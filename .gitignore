@@ -1,0 +1,19 @@
+# Credentials - never commit
+.env
+*.env
+
+# Logs and state
+*.log
+*_err.log
+*_state.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+
+# Claude internal
+.claude/
