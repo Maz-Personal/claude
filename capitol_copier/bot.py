@@ -32,7 +32,7 @@ from trader import execute_trade, get_account, rebalance_to_base, place_partial_
 # ── Logging with rotation ─────────────────────────────────────────────────────
 # Rotates at 5 MB, keeps 5 backup files → max ~25 MB of logs on disk
 _file_handler = logging.handlers.RotatingFileHandler(
-    LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    _LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
 )
 _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 
@@ -42,7 +42,9 @@ _console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(m
 logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _console_handler])
 log = logging.getLogger(__name__)
 
-STATE_PATH = Path(__file__).parent / STATE_FILE
+_BOT_DIR   = Path(__file__).parent
+STATE_PATH = _BOT_DIR / STATE_FILE
+_LOG_PATH  = _BOT_DIR / LOG_FILE
 
 SECTOR_CHECKS = {
     "energy":     is_energy,
