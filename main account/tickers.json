@@ -1,0 +1,13 @@
+{
+  "_comment": "Add or remove tickers here. Each entry can override strategy defaults per-ticker.",
+  "tickers": [
+    {
+      "symbol": "TSLA",
+      "qty": 10,
+      "stop_pct": 0.10,
+      "trail_trigger": 0.10,
+      "trail_pct": 0.05,
+      "ladder_enabled": true
+    }
+  ]
+}

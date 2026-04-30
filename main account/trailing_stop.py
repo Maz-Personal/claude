@@ -1,14 +1,16 @@
 """
 Trailing Stop + Ladder Buy Strategy — Paper Trading (Multi-Ticker)
 ═══════════════════════════════════════════════════════════════════
+Add/remove tickers by editing tickers.json — no code changes needed.
+
 Usage:
-    python trailing_stop.py TSLA                  ← single ticker, defaults
-    python trailing_stop.py TSLA NVDA AAPL        ← multiple tickers
-    python trailing_stop.py TSLA --qty 20         ← 20 shares initial buy
-    python trailing_stop.py TSLA --stop 0.08      ← 8% initial stop instead of 10%
-    python trailing_stop.py TSLA --trail-pct 0.05 ← 5% trailing (default)
-    python trailing_stop.py TSLA --no-ladder      ← disable ladder buys
-    python trailing_stop.py TSLA --once           ← one check then exit (for Task Scheduler)
+    python trailing_stop.py                       ← reads tickers from tickers.json
+    python trailing_stop.py TSLA NVDA AAPL        ← override: use these tickers instead
+    python trailing_stop.py --qty 20              ← override default qty for all tickers
+    python trailing_stop.py --stop 0.08           ← 8% initial stop instead of 10%
+    python trailing_stop.py --trail-pct 0.05      ← 5% trailing (default)
+    python trailing_stop.py --no-ladder           ← disable ladder buys
+    python trailing_stop.py --once                ← one check then exit (for Task Scheduler)
 
 Strategy:
     1. Market buy initial shares
@@ -195,14 +197,26 @@ def process_ticker(state, cfg):
 #  CLI & MAIN LOOP
 # ══════════════════════════════════════════════════════════════════════════════
 
+TICKERS_CONFIG = _DIR / "tickers.json"
+
+
+def load_tickers_config():
+    """Load tickers and per-ticker overrides from tickers.json."""
+    if not TICKERS_CONFIG.exists():
+        return []
+    with open(TICKERS_CONFIG) as f:
+        data = json.load(f)
+    return data.get("tickers", [])
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Trailing Stop + Ladder Buy Strategy — any number of tickers",
-        usage="python trailing_stop.py TICKER [TICKER ...] [options]",
+        usage="python trailing_stop.py [TICKER ...] [options]",
     )
     parser.add_argument(
-        "tickers", nargs="+", type=str,
-        help="One or more stock ticker symbols (e.g. TSLA NVDA AAPL)",
+        "tickers", nargs="*", type=str,
+        help="Tickers to monitor (default: reads from tickers.json)",
     )
     parser.add_argument(
         "--qty", type=int, default=DEFAULTS["qty"],
@@ -238,8 +252,26 @@ def parse_args():
 def main():
     args = parse_args()
 
-    tickers = [t.upper() for t in args.tickers]
-    cfg = {
+    # ── Resolve ticker list + per-ticker configs ──────────────────────────────
+    cli_tickers = [t.upper() for t in args.tickers]
+    ticker_cfgs = {}  # symbol -> cfg overrides from tickers.json
+
+    if cli_tickers:
+        # CLI tickers override tickers.json entirely
+        tickers = cli_tickers
+    else:
+        config_entries = load_tickers_config()
+        if not config_entries:
+            print("ERROR: No tickers provided and tickers.json is empty or missing.")
+            print(f"  Add tickers to {TICKERS_CONFIG}")
+            print("  or pass them as arguments: python trailing_stop.py TSLA NVDA")
+            sys.exit(1)
+        tickers = [e["symbol"].upper() for e in config_entries]
+        for entry in config_entries:
+            ticker_cfgs[entry["symbol"].upper()] = entry
+
+    # Default cfg from CLI flags (applies to all tickers unless overridden per-ticker)
+    base_cfg = {
         "qty":            args.qty,
         "stop_pct":       args.stop,
         "trail_trigger":  args.trail_trigger,
@@ -249,17 +281,25 @@ def main():
         "ladders":        DEFAULTS["ladders"],
     }
 
+    # Build per-ticker cfg by merging base with any tickers.json overrides
+    def build_cfg(symbol):
+        overrides = ticker_cfgs.get(symbol, {})
+        return {
+            "qty":            overrides.get("qty",            base_cfg["qty"]),
+            "stop_pct":       overrides.get("stop_pct",       base_cfg["stop_pct"]),
+            "trail_trigger":  overrides.get("trail_trigger",  base_cfg["trail_trigger"]),
+            "trail_pct":      overrides.get("trail_pct",      base_cfg["trail_pct"]),
+            "poll_secs":      base_cfg["poll_secs"],
+            "ladder_enabled": overrides.get("ladder_enabled", base_cfg["ladder_enabled"]),
+            "ladders":        DEFAULTS["ladders"],
+        }
+
     print("=" * 64)
     print(f"  TRAILING STOP + LADDER BUY — Paper Trading")
     print(f"  Tickers        : {', '.join(tickers)}")
-    print(f"  Initial qty    : {cfg['qty']} shares each")
-    print(f"  Stop loss      : {cfg['stop_pct']:.0%}  |  Trail trigger: +{cfg['trail_trigger']:.0%}  |  "
-          f"Trail distance: {cfg['trail_pct']:.0%}")
-    print(f"  Ladders        : {'ON' if cfg['ladder_enabled'] else 'OFF'}")
-    if cfg["ladder_enabled"]:
-        ladder_str = "  ".join(f"{p:.0%}→+{q}" for p, q in cfg["ladders"])
-        print(f"                   {ladder_str}")
-    mode = "ONCE (scheduler)" if args.once else f"CONTINUOUS (poll {cfg['poll_secs']}s)"
+    source = "CLI args" if cli_tickers else "tickers.json"
+    print(f"  Config source  : {source}")
+    mode = "ONCE (scheduler)" if args.once else f"CONTINUOUS (poll {base_cfg['poll_secs']}s)"
     print(f"  Mode           : {mode}")
     print(f"  Started        : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 64)
@@ -267,13 +307,16 @@ def main():
 
     # ── Load or initialize state per ticker ───────────────────────────────────
     states = []
+    cfgs   = []
     for symbol in tickers:
+        cfg = build_cfg(symbol)
         existing = load_state(symbol)
         if existing and not existing.get("position_closed"):
             log(symbol, f"Resuming — entry ${existing['entry_price']:.2f}  "
                         f"stop ${existing['stop_loss']:.2f}  "
                         f"qty {existing['total_qty']}")
             states.append(existing)
+            cfgs.append(cfg)
         else:
             log(symbol, f"Placing initial market buy: {cfg['qty']} shares")
             order = place_order(symbol, cfg["qty"], OrderSide.BUY)
@@ -283,6 +326,7 @@ def main():
             entry_price = get_price(symbol)
             state = init_state(symbol, entry_price, cfg["qty"], cfg)
             states.append(state)
+            cfgs.append(cfg)
 
             log(symbol, f"Entry: ${entry_price:.2f}  "
                         f"Stop: ${state['stop_loss']:.2f}  "
@@ -298,7 +342,7 @@ def main():
         for i, state in enumerate(states):
             if not state.get("position_closed"):
                 try:
-                    states[i] = process_ticker(state, cfg)
+                    states[i] = process_ticker(state, cfgs[i])
                 except Exception as e:
                     log(state["symbol"], f"ERROR: {e}")
         return
@@ -313,7 +357,7 @@ def main():
                 if not state.get("position_closed"):
                     all_closed = False
                     try:
-                        states[i] = process_ticker(state, cfg)
+                        states[i] = process_ticker(state, cfgs[i])
                     except Exception as e:
                         log(state["symbol"], f"ERROR: {e}")
 
@@ -321,7 +365,7 @@ def main():
                 print("\nAll positions closed. Strategy complete.")
                 break
 
-            time.sleep(cfg["poll_secs"])
+            time.sleep(base_cfg["poll_secs"])
 
         except KeyboardInterrupt:
             print("\n\nMonitor stopped. All states saved.")
