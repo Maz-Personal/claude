@@ -1,0 +1,33 @@
+# Credentials — never commit
+.env
+*.env
+
+# Logs and state
+*.log
+*_err.log
+*_state.json
+state.json
+bot.log
+bot.log.*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Node
+node_modules/
+
+# Claude internal
+.claude/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Misc
+WPPMedia/
+*.etl
+*.etl.bak
