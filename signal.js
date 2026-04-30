@@ -10,6 +10,39 @@
 import { setSymbol, setTimeframe } from '../tradingview-mcp/src/core/chart.js';
 import { getOhlcv, getQuote } from '../tradingview-mcp/src/core/data.js';
 import { drawShape, clearAll } from '../tradingview-mcp/src/core/drawing.js';
+import { execSync, spawn } from 'child_process';
+
+// Auto-launch Chrome with TradingView if not already running on port 9222
+async function ensureChrome() {
+  try {
+    const res = await fetch('http://localhost:9222/json');
+    const tabs = await res.json();
+    if (tabs.some(t => t.url?.includes('tradingview.com'))) return; // already good
+  } catch { /* not running */ }
+
+  console.log('Launching Chrome with TradingView...');
+  spawn('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', [
+    '--remote-debugging-port=9222',
+    '--user-data-dir=C:\\ChromeDebug',
+    'https://www.tradingview.com/chart/'
+  ], { detached: true, stdio: 'ignore' }).unref();
+
+  // Wait for TradingView to load
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const res = await fetch('http://localhost:9222/json');
+      const tabs = await res.json();
+      if (tabs.some(t => t.url?.includes('tradingview.com'))) {
+        await new Promise(r => setTimeout(r, 5000)); // extra wait for chart to render
+        return;
+      }
+    } catch { /* keep waiting */ }
+  }
+  throw new Error('TradingView failed to load after 60 seconds.');
+}
+
+await ensureChrome();
 
 const [,, rawTicker, rawAvg, rawShares] = process.argv;
 
