@@ -24,6 +24,14 @@
       "trail_trigger": 0.10,
       "trail_pct": 0.05,
       "ladder_enabled": true
+    },
+    {
+      "symbol": "CRM",
+      "qty": 20,
+      "stop_pct": 0.10,
+      "trail_trigger": 0.10,
+      "trail_pct": 0.05,
+      "ladder_enabled": true
     }
   ]
 }
