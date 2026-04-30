@@ -30,9 +30,11 @@ from datetime import date, datetime, timedelta
 from dotenv import dotenv_values
 
 # ── Alpaca credentials ────────────────────────────────────────────────────────
+#    Uses WHEEL_ALPACA_API_KEY / WHEEL_ALPACA_API_SECRET from .env
+#    Falls back to ALPACA_API_KEY / ALPACA_API_SECRET if not set
 creds      = dotenv_values(".env")
-API_KEY    = creds.get("ALPACA_API_KEY", "")
-API_SECRET = creds.get("ALPACA_API_SECRET", "")
+API_KEY    = creds.get("WHEEL_ALPACA_API_KEY", creds.get("ALPACA_API_KEY", ""))
+API_SECRET = creds.get("WHEEL_ALPACA_API_SECRET", creds.get("ALPACA_API_SECRET", ""))
 HEADERS    = {"APCA-API-KEY-ID": API_KEY, "APCA-API-SECRET-KEY": API_SECRET}
 BASE       = "https://paper-api.alpaca.markets/v2"
 DATA       = "https://data.alpaca.markets"
