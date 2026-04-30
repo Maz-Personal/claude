@@ -3,7 +3,7 @@
   "tickers": [
     {
       "symbol": "TSLA",
-      "qty": 10,
+      "qty": 20,
       "stop_pct": 0.10,
       "trail_trigger": 0.10,
       "trail_pct": 0.05,
@@ -11,7 +11,7 @@
     },
     {
       "symbol": "AMD",
-      "qty": 10,
+      "qty": 20,
       "stop_pct": 0.10,
       "trail_trigger": 0.10,
       "trail_pct": 0.05,
@@ -19,7 +19,7 @@
     },
     {
       "symbol": "ARM",
-      "qty": 10,
+      "qty": 20,
       "stop_pct": 0.10,
       "trail_trigger": 0.10,
       "trail_pct": 0.05,
