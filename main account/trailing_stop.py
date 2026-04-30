@@ -8,6 +8,7 @@ Usage:
     python trailing_stop.py TSLA --stop 0.08      ← 8% initial stop instead of 10%
     python trailing_stop.py TSLA --trail-pct 0.05 ← 5% trailing (default)
     python trailing_stop.py TSLA --no-ladder      ← disable ladder buys
+    python trailing_stop.py TSLA --once           ← one check then exit (for Task Scheduler)
 
 Strategy:
     1. Market buy initial shares
@@ -23,6 +24,7 @@ import json
 import time
 import argparse
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
@@ -30,10 +32,10 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestTradeRequest
 
-load_dotenv()
+# Anchor all paths to this script's directory so Task Scheduler works correctly
+_DIR = Path(__file__).parent
+load_dotenv(_DIR.parent / ".env")
 
-# Uses TRAILING_ALPACA_API_KEY / TRAILING_ALPACA_API_SECRET from .env
-# Falls back to ALPACA_API_KEY / ALPACA_API_SECRET if not set
 API_KEY    = os.getenv("TRAILING_ALPACA_API_KEY", os.getenv("ALPACA_API_KEY"))
 API_SECRET = os.getenv("TRAILING_ALPACA_API_SECRET", os.getenv("ALPACA_API_SECRET"))
 
@@ -46,7 +48,7 @@ DEFAULTS = {
     "stop_pct":         0.10,     # 10% initial stop loss
     "trail_trigger":    0.10,     # +10% activates trailing
     "trail_pct":        0.05,     # trail 5% below running high
-    "poll_secs":        30,       # polling interval
+    "poll_secs":        30,       # polling interval (continuous mode)
     "ladder_enabled":   True,     # ladder buys on/off
     "ladders": [                  # (pct_drop, shares_to_buy)
         (-0.15, 10),
@@ -90,15 +92,15 @@ def log_order(symbol, label, order, extra=""):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  STATE MANAGEMENT — one state file per ticker
+#  STATE MANAGEMENT — one state file per ticker, anchored to script dir
 # ══════════════════════════════════════════════════════════════════════════════
 
 def state_file(symbol):
-    return f"{symbol.lower()}_trailing_state.json"
+    return _DIR / f"{symbol.lower()}_trailing_state.json"
 
 def load_state(symbol):
     path = state_file(symbol)
-    if os.path.exists(path):
+    if path.exists():
         with open(path) as f:
             return json.load(f)
     return None  # None = needs initial buy
@@ -110,15 +112,15 @@ def save_state(state):
 def init_state(symbol, entry_price, qty, cfg):
     """Create fresh state after initial buy."""
     state = {
-        "symbol":           symbol,
-        "entry_price":      entry_price,
-        "stop_loss":        round(entry_price * (1 - cfg["stop_pct"]), 2),
-        "total_qty":        qty,
-        "trail_trigger":    round(entry_price * (1 + cfg["trail_trigger"]), 2),
-        "trailing_active":  False,
-        "position_closed":  False,
+        "symbol":            symbol,
+        "entry_price":       entry_price,
+        "stop_loss":         round(entry_price * (1 - cfg["stop_pct"]), 2),
+        "total_qty":         qty,
+        "trail_trigger":     round(entry_price * (1 + cfg["trail_trigger"]), 2),
+        "trailing_active":   False,
+        "position_closed":   False,
         "ladders_triggered": [],   # list of pct levels already triggered
-        "started_at":       datetime.now().isoformat(),
+        "started_at":        datetime.now().isoformat(),
     }
     save_state(state)
     return state
@@ -167,7 +169,6 @@ def process_ticker(state, cfg):
     # ── Ladder buys ───────────────────────────────────────────────────────────
     if cfg["ladder_enabled"]:
         triggered = state.get("ladders_triggered", [])
-        # Check deepest levels first to avoid double-fire
         for ladder_pct, ladder_qty in sorted(cfg["ladders"], key=lambda x: x[0]):
             if pct <= ladder_pct * 100 and ladder_pct not in triggered:
                 triggered.append(ladder_pct)
@@ -227,6 +228,10 @@ def parse_args():
         "--no-ladder", action="store_true",
         help="Disable ladder buys",
     )
+    parser.add_argument(
+        "--once", action="store_true",
+        help="Run one check then exit (use with Task Scheduler instead of continuous loop)",
+    )
     return parser.parse_args()
 
 
@@ -254,7 +259,8 @@ def main():
     if cfg["ladder_enabled"]:
         ladder_str = "  ".join(f"{p:.0%}→+{q}" for p, q in cfg["ladders"])
         print(f"                   {ladder_str}")
-    print(f"  Poll           : {cfg['poll_secs']}s")
+    mode = "ONCE (scheduler)" if args.once else f"CONTINUOUS (poll {cfg['poll_secs']}s)"
+    print(f"  Mode           : {mode}")
     print(f"  Started        : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 64)
     print()
@@ -269,11 +275,10 @@ def main():
                         f"qty {existing['total_qty']}")
             states.append(existing)
         else:
-            # Fresh start: place initial market buy
             log(symbol, f"Placing initial market buy: {cfg['qty']} shares")
             order = place_order(symbol, cfg["qty"], OrderSide.BUY)
             log_order(symbol, "INITIAL BUY", order)
-            time.sleep(2)  # let the order register
+            time.sleep(2)
 
             entry_price = get_price(symbol)
             state = init_state(symbol, entry_price, cfg["qty"], cfg)
@@ -288,7 +293,17 @@ def main():
                     log(symbol, f"  Ladder {pct:.0%}: buy {qty} shares @ ${lvl:.2f}")
             print()
 
-    # ── Monitor loop ──────────────────────────────────────────────────────────
+    # ── --once mode: one check per ticker then exit ───────────────────────────
+    if args.once:
+        for i, state in enumerate(states):
+            if not state.get("position_closed"):
+                try:
+                    states[i] = process_ticker(state, cfg)
+                except Exception as e:
+                    log(state["symbol"], f"ERROR: {e}")
+        return
+
+    # ── Continuous monitor loop ───────────────────────────────────────────────
     print(">>> Monitoring started. Press Ctrl+C to stop.\n")
 
     while True:
