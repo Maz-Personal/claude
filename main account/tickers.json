@@ -32,6 +32,46 @@
       "trail_trigger": 0.10,
       "trail_pct": 0.05,
       "ladder_enabled": true
+    },
+    {
+      "symbol": "CRWV",
+      "qty": 20,
+      "stop_pct": 0.10,
+      "trail_trigger": 0.10,
+      "trail_pct": 0.05,
+      "ladder_enabled": true
+    },
+    {
+      "symbol": "MRVL",
+      "qty": 20,
+      "stop_pct": 0.10,
+      "trail_trigger": 0.10,
+      "trail_pct": 0.05,
+      "ladder_enabled": true
+    },
+    {
+      "symbol": "SOUN",
+      "qty": 20,
+      "stop_pct": 0.10,
+      "trail_trigger": 0.10,
+      "trail_pct": 0.05,
+      "ladder_enabled": true
+    },
+    {
+      "symbol": "SHOP",
+      "qty": 20,
+      "stop_pct": 0.10,
+      "trail_trigger": 0.10,
+      "trail_pct": 0.05,
+      "ladder_enabled": true
+    },
+    {
+      "symbol": "GOOGL",
+      "qty": 20,
+      "stop_pct": 0.10,
+      "trail_trigger": 0.10,
+      "trail_pct": 0.05,
+      "ladder_enabled": true
     }
   ]
 }
