@@ -35,8 +35,8 @@ from alpaca.data.timeframe import TimeFrame
 _DIR = Path(__file__).parent
 load_dotenv(_DIR.parent / ".env")
 
-API_KEY    = os.getenv("AGENT_ALPACA_API_KEY",    os.getenv("TRAILING_ALPACA_API_KEY"))
-API_SECRET = os.getenv("AGENT_ALPACA_API_SECRET", os.getenv("TRAILING_ALPACA_API_SECRET"))
+API_KEY    = os.getenv("AGENT_ALPACA_API_KEY",    os.getenv("WHEEL_ALPACA_API_KEY"))
+API_SECRET = os.getenv("AGENT_ALPACA_API_SECRET", os.getenv("WHEEL_ALPACA_API_SECRET"))
 
 trading = TradingClient(API_KEY, API_SECRET, paper=True)
 data    = StockHistoricalDataClient(API_KEY, API_SECRET)
