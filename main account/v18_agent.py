@@ -6,17 +6,17 @@ ARCHITECTURE:
   State Machine: Pending → Open → [Reconcile] → Liquidated
 
   NVDA: Bull Call Vertical  $197.5C / $202.5C  (Buy long / Sell short)
-  USO:  Bear Put Vertical   $145.0P / $140.0P  (Buy long / Sell short)
+  XLE:  Bear Put Vertical   $60.0P  / $55.0P   (Buy long / Sell short)
 
   Expiry     : May 8, 2026
   Allocation : $20,000 per tranche
-  Net Debit  : ~$1.42 (NVDA), ~$1.40 (USO)
+  Net Debit  : ~$1.42 (NVDA), ~$1.40 (XLE)
   Contracts  : 40 each
 
 EXECUTION SCENARIOS:
   A (Optimal)     : B/A spread < 0.2% AND GK vol aligned → market order
   B (Conservative): Slippage > 0.5% → limit-chase (RECONCILE state)
-  C (Thesis Break): NVDA < $192 OR USO > $148.50 → immediate exit
+  C (Thesis Break): NVDA < $192 OR XLE > $63.00 → immediate exit
 
 SAFEGUARDS:
   - Friday Kill-Switch : force exit at 11:30 AM ET every Friday
@@ -84,8 +84,8 @@ EXPIRY_OCC     = "260508"                   # OCC date format for symbol
 
 NVDA_LONG_STRIKE  = 197.50
 NVDA_SHORT_STRIKE = 202.50
-USO_LONG_STRIKE   = 145.00
-USO_SHORT_STRIKE  = 140.00
+XLE_LONG_STRIKE   = 60.00
+XLE_SHORT_STRIKE  = 55.00
 
 QTY             = 40                        # Contracts per leg
 PROFIT_GATE     = 0.85                      # Exit at 85% of max profit
@@ -95,7 +95,7 @@ SLIPPAGE_MAX    = 0.005                     # 0.5% slippage threshold
 LIMIT_CHASE_MAX = 5                         # Max order mods per 60s window
 
 NVDA_THESIS_BREAK = 192.00                  # Scenario C: NVDA below this → exit
-USO_THESIS_BREAK  = 148.50                  # Scenario C: USO above this → exit
+XLE_THESIS_BREAK  = 63.00                   # Scenario C: XLE above this → exit
 
 FRIDAY_KILL_HOUR  = 11                      # 11:30 AM ET kill-switch
 FRIDAY_KILL_MIN   = 30
@@ -468,15 +468,15 @@ class StatePending(TradeState):
 
         # Get underlying prices
         nvda_bid, nvda_ask = get_underlying_quote("NVDA")
-        uso_bid,  uso_ask  = get_underlying_quote("USO")
+        xle_bid,  xle_ask  = get_underlying_quote("XLE")
 
-        if not nvda_bid or not uso_bid:
+        if not nvda_bid or not xle_bid:
             log.warning("Could not fetch quotes — skipping.")
             return
 
         nvda_price = (nvda_bid + nvda_ask) / 2
-        uso_price  = (uso_bid  + uso_ask)  / 2
-        log.info(f"NVDA ${nvda_price:.2f}  USO ${uso_price:.2f}")
+        xle_price  = (xle_bid  + xle_ask)  / 2
+        log.info(f"NVDA ${nvda_price:.2f}  XLE ${xle_price:.2f}")
 
         # GK Volatility alignment check
         nvda_short_vol, nvda_smooth_vol = ctx.gk_nvda.compute()
@@ -486,20 +486,20 @@ class StatePending(TradeState):
         # B/A spread check on options legs
         nvda_long_sym  = occ_symbol("NVDA", NVDA_LONG_STRIKE,  ContractType.CALL)
         nvda_short_sym = occ_symbol("NVDA", NVDA_SHORT_STRIKE, ContractType.CALL)
-        uso_long_sym   = occ_symbol("USO",  USO_LONG_STRIKE,   ContractType.PUT)
-        uso_short_sym  = occ_symbol("USO",  USO_SHORT_STRIKE,  ContractType.PUT)
+        xle_long_sym   = occ_symbol("XLE",  XLE_LONG_STRIKE,   ContractType.PUT)
+        xle_short_sym  = occ_symbol("XLE",  XLE_SHORT_STRIKE,  ContractType.PUT)
 
-        log.info(f"Option symbols: {nvda_long_sym} / {nvda_short_sym} / {uso_long_sym} / {uso_short_sym}")
+        log.info(f"Option symbols: {nvda_long_sym} / {nvda_short_sym} / {xle_long_sym} / {xle_short_sym}")
 
         nvda_long_q  = get_option_quote(nvda_long_sym)
         nvda_short_q = get_option_quote(nvda_short_sym)
-        uso_long_q   = get_option_quote(uso_long_sym)
-        uso_short_q  = get_option_quote(uso_short_sym)
+        xle_long_q   = get_option_quote(xle_long_sym)
+        xle_short_q  = get_option_quote(xle_short_sym)
 
         # Determine scenario
         spreads_ok = True
         for q, sym in [(nvda_long_q, nvda_long_sym), (nvda_short_q, nvda_short_sym),
-                       (uso_long_q,  uso_long_sym),  (uso_short_q,  uso_short_sym)]:
+                       (xle_long_q,  xle_long_sym),  (xle_short_q,  xle_short_sym)]:
             if q:
                 sp = ba_spread_pct(q[0], q[1])
                 log.info(f"  {sym}: bid={q[0]:.2f} ask={q[1]:.2f} spread={sp:.3%}")
@@ -511,7 +511,7 @@ class StatePending(TradeState):
         if spreads_ok and vol_aligned:
             log.info("Scenario A (OPTIMAL): tight spreads + vol aligned → MARKET entry.")
             ctx._enter(
-                nvda_long_sym, nvda_short_sym, uso_long_sym, uso_short_sym,
+                nvda_long_sym, nvda_short_sym, xle_long_sym, xle_short_sym,
                 use_limit=False
             )
         else:
@@ -519,13 +519,13 @@ class StatePending(TradeState):
             # Use mid price as limit
             def mid(q): return q[2] if q else None
             ctx._enter(
-                nvda_long_sym, nvda_short_sym, uso_long_sym, uso_short_sym,
+                nvda_long_sym, nvda_short_sym, xle_long_sym, xle_short_sym,
                 use_limit=True,
                 limits={
                     nvda_long_sym:  mid(nvda_long_q)  or NVDA_LONG_STRIKE  * 0.01,
                     nvda_short_sym: mid(nvda_short_q) or NVDA_SHORT_STRIKE * 0.01,
-                    uso_long_sym:   mid(uso_long_q)   or USO_LONG_STRIKE   * 0.01,
-                    uso_short_sym:  mid(uso_short_q)  or USO_SHORT_STRIKE  * 0.01,
+                    xle_long_sym:   mid(xle_long_q)   or XLE_LONG_STRIKE   * 0.01,
+                    xle_short_sym:  mid(xle_short_q)  or XLE_SHORT_STRIKE  * 0.01,
                 }
             )
 
@@ -656,15 +656,15 @@ class V18Agent:
         self.state = state
 
     def thesis_broken(self):
-        """Scenario C: NVDA < $192 OR USO > $148.50."""
+        """Scenario C: NVDA < $192 OR XLE > $148.50."""
         try:
             nvda_bid, nvda_ask = get_underlying_quote("NVDA")
-            uso_bid,  uso_ask  = get_underlying_quote("USO")
+            xle_bid,  xle_ask  = get_underlying_quote("XLE")
             nvda_price = (nvda_bid + nvda_ask) / 2 if nvda_bid else 999
-            uso_price  = (uso_bid  + uso_ask)  / 2 if uso_bid  else 0
-            broken = nvda_price < NVDA_THESIS_BREAK or uso_price > USO_THESIS_BREAK
+            xle_price  = (xle_bid  + xle_ask)  / 2 if xle_bid  else 0
+            broken = nvda_price < NVDA_THESIS_BREAK or xle_price > XLE_THESIS_BREAK
             if broken:
-                log.warning(f"Thesis broken: NVDA=${nvda_price:.2f} USO=${uso_price:.2f}")
+                log.warning(f"Thesis broken: NVDA=${nvda_price:.2f} XLE=${xle_price:.2f}")
             return broken
         except Exception:
             return False
@@ -672,30 +672,36 @@ class V18Agent:
     def compute_pnl(self):
         """Estimate PnL as fraction of max profit based on current option prices."""
         try:
-            total_current = 0.0
-            total_entry   = sum(self.entry_debits.values())
+            total_entry = sum(self.entry_debits.values())
             if total_entry == 0:
                 return 0.0
-            for sym, entry_debit in self.entry_debits.items():
-                q = get_option_quote(sym)
-                if q:
-                    total_current += q[2] * (
-                        QTY if self.legs.get(sym) and self.legs[sym].side == OrderSide.BUY else -QTY
-                    )
+            total_current = 0.0
+            legs_priced   = 0
+            for name, leg in self.legs.items():
+                q = get_option_quote(leg.symbol)
+                if not q:
+                    log.warning(f"PnL: no quote for {leg.symbol} — skipping leg.")
+                    continue
+                sign = 1 if leg.side == OrderSide.BUY else -1
+                total_current += q[2] * QTY * sign
+                legs_priced   += 1
+            if legs_priced == 0:
+                log.warning("PnL: no legs priced — returning 0.")
+                return 0.0
             return (total_current - total_entry) / abs(total_entry)
         except Exception as e:
             log.warning(f"PnL computation failed: {e}")
             return 0.0
 
-    def _enter(self, nvda_long_sym, nvda_short_sym, uso_long_sym, uso_short_sym,
+    def _enter(self, nvda_long_sym, nvda_short_sym, xle_long_sym, xle_short_sym,
                use_limit=False, limits=None):
         """Place all four legs. Sets legs dict and transitions to StateOpen."""
         log.info("=== ENTERING POSITION ===")
         specs = [
             ("nvda_long",  nvda_long_sym,  OrderSide.BUY),
             ("nvda_short", nvda_short_sym, OrderSide.SELL),
-            ("uso_long",   uso_long_sym,   OrderSide.BUY),
-            ("uso_short",  uso_short_sym,  OrderSide.SELL),
+            ("xle_long",   xle_long_sym,   OrderSide.BUY),
+            ("xle_short",  xle_short_sym,  OrderSide.SELL),
         ]
         all_ok = True
         for name, sym, side in specs:
@@ -726,7 +732,7 @@ class V18Agent:
         log.info("  V18.9 Agentic System | Options Spread Agent")
         log.info(f"  Mode    : {'DRY-RUN' if self.dry_run else 'LIVE (PAPER)'}")
         log.info(f"  NVDA    : Bull Call Vertical ${NVDA_LONG_STRIKE}C / ${NVDA_SHORT_STRIKE}C  x{QTY}")
-        log.info(f"  USO     : Bear Put Vertical  ${USO_LONG_STRIKE}P / ${USO_SHORT_STRIKE}P  x{QTY}")
+        log.info(f"  XLE     : Bear Put Vertical  ${XLE_LONG_STRIKE}P / ${XLE_SHORT_STRIKE}P  x{QTY}")
         log.info(f"  Expiry  : {EXPIRY}")
         log.info(f"  Account : equity ${float(acct.equity):,.2f}  cash ${float(acct.cash):,.2f}")
         log.info("═══════════════════════════════════════════════════")
