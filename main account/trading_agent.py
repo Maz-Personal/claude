@@ -3,13 +3,16 @@ TradingAgent V18.9 — Complete Implementation
 ═════════════════════════════════════════════
 State Machine: Pending → Open → Liquidated
 
+Reads tickers from tickers.json by default (no args needed).
+Each ticker runs in its own thread concurrently.
+
 Usage:
-    python trading_agent.py NVDA           ← monitor NVDA, 40 shares (default)
-    python trading_agent.py NVDA 20        ← monitor NVDA, 20 shares
-    python trading_agent.py NVDA 40 120    ← monitor NVDA, 40 shares, poll every 120s
+    python trading_agent.py                ← reads all tickers from tickers.json
+    python trading_agent.py NVDA           ← override: monitor NVDA only
+    python trading_agent.py NVDA 20        ← override: NVDA, 20 shares
 
 Credentials: AGENT_ALPACA_API_KEY / AGENT_ALPACA_API_SECRET in .env
-             Falls back to TRAILING_ALPACA_API_KEY / TRAILING_ALPACA_API_SECRET
+             Falls back to WHEEL_ALPACA_API_KEY / WHEEL_ALPACA_API_SECRET
 """
 
 import json
@@ -18,6 +21,7 @@ import logging
 import logging.handlers
 import os
 import sys
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from datetime import datetime, timezone
@@ -333,13 +337,62 @@ class TradingAgent:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  TICKERS.JSON LOADER
+# ══════════════════════════════════════════════════════════════════════════════
+
+TICKERS_FILE = _DIR / "tickers.json"
+
+def load_tickers_config():
+    """Load tickers from tickers.json. Returns list of dicts."""
+    if not TICKERS_FILE.exists():
+        log.warning(f"tickers.json not found at {TICKERS_FILE} — using NVDA default")
+        return [{"symbol": "NVDA", "qty": 40}]
+    with open(TICKERS_FILE) as f:
+        data = json.load(f)
+    return data.get("tickers", [])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    ticker    = sys.argv[1].upper() if len(sys.argv) > 1 else "NVDA"
-    qty       = int(sys.argv[2])    if len(sys.argv) > 2 else 40
-    poll_secs = int(sys.argv[3])    if len(sys.argv) > 3 else POLL_SECS
+    # CLI override: python trading_agent.py NVDA [qty]
+    if len(sys.argv) > 1:
+        ticker_list = [{"symbol": sys.argv[1].upper(),
+                        "qty": int(sys.argv[2]) if len(sys.argv) > 2 else 40}]
+        log.info(f"CLI override: monitoring {ticker_list[0]['symbol']}")
+    else:
+        ticker_list = load_tickers_config()
+        log.info(f"Loaded {len(ticker_list)} ticker(s) from tickers.json: "
+                 f"{[t['symbol'] for t in ticker_list]}")
 
-    agent = TradingAgent(ticker, qty, poll_secs)
-    agent.run()
+    acct = trading.get_account()
+    log.info(f"Alpaca: {acct.status} | equity ${float(acct.equity):,.2f} | cash ${float(acct.cash):,.2f}")
+
+    if len(ticker_list) == 1:
+        # Single ticker — run in main thread
+        t = ticker_list[0]
+        agent = TradingAgent(t["symbol"], t.get("qty", 40))
+        agent.run()
+    else:
+        # Multiple tickers — each runs in its own thread
+        threads = []
+        for t in ticker_list:
+            agent = TradingAgent(t["symbol"], t.get("qty", 40))
+            thread = threading.Thread(
+                target=agent.run,
+                name=f"agent-{t['symbol']}",
+                daemon=True,
+            )
+            threads.append(thread)
+            thread.start()
+            log.info(f"Started agent thread for {t['symbol']} (qty={t.get('qty', 40)})")
+            time.sleep(1)  # stagger starts to avoid API rate limits
+
+        log.info(f"All {len(threads)} agent threads running. Press Ctrl+C to stop.")
+        try:
+            while any(t.is_alive() for t in threads):
+                time.sleep(10)
+        except KeyboardInterrupt:
+            log.info("Shutdown signal received — agents will finish current cycle.")
