@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/trading/main\x20account
-ExecStart=/root/trading/.venv/bin/python /root/trading/main\x20account/trading_agent.py NVDA 40
+WorkingDirectory=/root
+ExecStart=/bin/bash /root/run_trading_agent.sh
 Restart=always
 RestartSec=30
 StandardOutput=append:/root/trading/main account/trading_agent.log
