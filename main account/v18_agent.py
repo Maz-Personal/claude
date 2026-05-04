@@ -366,34 +366,81 @@ class GarmanKlassVol:
         except Exception:
             return 0.0
 
+    def _fetch_bars_yf(self, window):
+        """
+        Fetch intraday bars via yfinance (no subscription required).
+        Used for 1-min and 5-min windows where Alpaca SIP data is unavailable.
+        """
+        import yfinance as yf
+        interval = f"{window}m"
+        df = yf.download(
+            self.ticker,
+            period="1d",
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+        )
+        if df.empty:
+            return []
+        # Normalise to simple bar objects
+        bars = []
+        for _, row in df.tail(window).iterrows():
+            class _Bar:
+                pass
+            b = _Bar()
+            b.open  = float(row["Open"].iloc[0]  if hasattr(row["Open"],  "iloc") else row["Open"])
+            b.high  = float(row["High"].iloc[0]  if hasattr(row["High"],  "iloc") else row["High"])
+            b.low   = float(row["Low"].iloc[0]   if hasattr(row["Low"],   "iloc") else row["Low"])
+            b.close = float(row["Close"].iloc[0] if hasattr(row["Close"], "iloc") else row["Close"])
+            bars.append(b)
+        return bars
+
+    def _fetch_bars_alpaca(self, window):
+        """Fetch bars via Alpaca (works for 15-min with paper subscription)."""
+        start = datetime.now(timezone.utc) - timedelta(minutes=window * 2 + 10)
+        resp  = mkt.get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=self.ticker,
+            timeframe=TimeFrame(window, TimeFrameUnit.Minute),
+            start=start,
+        ))
+        return list(resp[self.ticker])
+
     def compute_all(self):
-        """Returns {1: vol, 5: vol, 15: vol} — annualised."""
+        """
+        Returns {1: vol, 5: vol, 15: vol} — annualised GK volatility.
+        1-min and 5-min: fetched via yfinance (no SIP subscription needed).
+        15-min: fetched via Alpaca (works on paper accounts).
+        """
         results = {}
         for window in GK_WINDOWS:
             try:
-                start = datetime.now(timezone.utc) - timedelta(minutes=window + 5)
-                resp  = mkt.get_stock_bars(StockBarsRequest(
-                    symbol_or_symbols=self.ticker,
-                    timeframe=TimeFrame(1, TimeFrameUnit.Minute),
-                    start=start,
-                ))
-                bars = list(resp[self.ticker])
+                # yfinance for short windows, Alpaca for 15-min
+                if window in (1, 5):
+                    bars = self._fetch_bars_yf(window)
+                else:
+                    bars = self._fetch_bars_alpaca(window)
+
                 if not bars:
                     results[window] = 0.0
                     continue
-                # Average GK over the window bars
-                vars = [self._gk_single(b) for b in bars[-window:]]
-                avg_var = sum(vars) / len(vars) if vars else 0.0
+
+                gk_vars = [self._gk_single(b) for b in bars[-window:]]
+                avg_var = sum(gk_vars) / len(gk_vars) if gk_vars else 0.0
                 vol = math.sqrt(max(avg_var * 252 * 6.5 * 60, 0))
+
                 # EMA smoothing
                 k = 2 / (window + 1)
                 if self._ema[window] is None:
                     self._ema[window] = vol
                 else:
                     self._ema[window] = vol * k + self._ema[window] * (1 - k)
+
                 results[window] = round(self._ema[window], 4)
+                slog(f"GK vol {self.ticker} {window}m: {results[window]:.4f}",
+                     action="GK_VOL",
+                     reason=f"window={window}m source={'yfinance' if window<15 else 'alpaca'}")
             except Exception as e:
-                slog(f"GK vol failed for {self.ticker} window={window}: {e}",
+                slog(f"GK vol failed {self.ticker} window={window}m: {e}",
                      action="GK_ERROR", reason=str(e), level="warning")
                 results[window] = 0.0
         return results
