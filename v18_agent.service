@@ -1,0 +1,16 @@
+[Unit]
+Description=V18.9 Options Spread Agent — NVDA Bull Call / XLE Bear Put
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+ExecStart=/bin/bash /root/run_v18_agent.sh
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
