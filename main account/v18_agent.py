@@ -1193,6 +1193,7 @@ class V18Agent:
         self.qty               = qty
         self.dry_run           = dry_run
         self.running           = True
+        self.state             = None   # initialised before first transition_to()
         self.spread            = None
         self.entry_limits      = {}
         self.at_breakeven      = False
@@ -1275,7 +1276,7 @@ class V18Agent:
             slog(f"Unknown state: {name}", action="BAD_TRANSITION",
                  reason=f"No state mapping for: {name}", level="error")
             return
-        from_state = type(self.state).__name__.replace("State", "").upper()
+        from_state = type(self.state).__name__.replace("State", "").upper() if self.state else "INIT"
         self.set_state(factory())
         self.ledger.save(agent_state=name.upper())
 
