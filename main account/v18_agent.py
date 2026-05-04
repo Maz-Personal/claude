@@ -683,7 +683,8 @@ class V18Agent:
                     log.warning(f"PnL: no quote for {leg.symbol} — skipping leg.")
                     continue
                 sign = 1 if leg.side == OrderSide.BUY else -1
-                total_current += q[2] * QTY * sign
+                entry = self.entry_debits.get(leg.symbol, q[2])  # fallback to current price
+                total_current += (q[2] - entry) * QTY * sign
                 legs_priced   += 1
             if legs_priced == 0:
                 log.warning("PnL: no legs priced — returning 0.")
