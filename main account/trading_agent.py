@@ -242,8 +242,11 @@ class TradingAgent:
     # ── Signal: EMA20 > EMA50, price above both, RSI < 70 ───────────────────
     def check_signals(self):
         try:
-            bars    = get_bars(self.ticker, 60)
+            bars    = list(get_bars(self.ticker, 60))
             closes  = [float(b.close) for b in bars]
+            if len(closes) < EMA_SLOW + 2:
+                log.warning(f"[{self.ticker}] Not enough bars ({len(closes)}) for signal check.")
+                return False
             price   = get_price(self.ticker)
             e20     = ema(closes, EMA_FAST)
             e50     = ema(closes, EMA_SLOW)
@@ -258,8 +261,10 @@ class TradingAgent:
     # ── Exit: EMA20 crosses below EMA50 (trend reversal) ────────────────────
     def check_exit_conditions(self):
         try:
-            bars   = get_bars(self.ticker, 60)
+            bars   = list(get_bars(self.ticker, 60))
             closes = [float(b.close) for b in bars]
+            if len(closes) < EMA_SLOW + 2:
+                return False
             e20    = ema(closes, EMA_FAST)
             e50    = ema(closes, EMA_SLOW)
             if e20 < e50:
