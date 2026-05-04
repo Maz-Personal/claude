@@ -670,26 +670,34 @@ class V18Agent:
             return False
 
     def compute_pnl(self):
-        """Estimate PnL as fraction of max profit based on current option prices."""
+        """
+        Estimate PnL as fraction of net debit paid.
+        Net debit = sum(BUY prices) - sum(SELL prices) at entry.
+        PnL = (current net value - entry net debit) / |entry net debit|
+        """
         try:
-            total_entry = sum(self.entry_debits.values())
-            if total_entry == 0:
+            if not self.legs or not self.entry_debits:
                 return 0.0
-            total_current = 0.0
-            legs_priced   = 0
+            net_entry   = 0.0
+            net_current = 0.0
+            legs_priced = 0
             for name, leg in self.legs.items():
+                entry_price = self.entry_debits.get(leg.symbol)
+                if entry_price is None:
+                    continue
                 q = get_option_quote(leg.symbol)
                 if not q:
-                    log.warning(f"PnL: no quote for {leg.symbol} — skipping leg.")
+                    log.warning(f"PnL: no quote for {leg.symbol} — skipping.")
                     continue
                 sign = 1 if leg.side == OrderSide.BUY else -1
-                entry = self.entry_debits.get(leg.symbol, q[2])  # fallback to current price
-                total_current += (q[2] - entry) * QTY * sign
-                legs_priced   += 1
-            if legs_priced == 0:
-                log.warning("PnL: no legs priced — returning 0.")
+                net_entry   += entry_price * sign   # BUY = paid, SELL = received
+                net_current += q[2]        * sign   # current value
+                legs_priced += 1
+            if legs_priced == 0 or abs(net_entry) < 0.001:
                 return 0.0
-            return (total_current - total_entry) / abs(total_entry)
+            pnl = (net_current - net_entry) / abs(net_entry)
+            log.info(f"PnL detail: net_entry={net_entry:.4f}  net_current={net_current:.4f}  pnl={pnl:+.1%}")
+            return pnl
         except Exception as e:
             log.warning(f"PnL computation failed: {e}")
             return 0.0
@@ -714,7 +722,7 @@ class V18Agent:
             self.legs[name] = leg
             self.ledger.record_order(name, leg.order_id or "DRY_RUN", sym, QTY, side.value)
             if ok and limits:
-                self.entry_debits[sym] = limits.get(sym, 0) * (1 if side == OrderSide.BUY else -1)
+                self.entry_debits[sym] = limits.get(sym, 0)  # raw price, sign applied in compute_pnl
             if not ok:
                 all_ok = False
 
