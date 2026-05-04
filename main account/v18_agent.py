@@ -344,12 +344,13 @@ def compute_confidence_score(gk_vols, nvda_long_q, nvda_short_q, xle_long_q, xle
     """
     score = 10.0
 
-    # Vol smoothing penalty
+    # Vol smoothing — use available windows only
     v1  = gk_vols.get(1,  0)
     v5  = gk_vols.get(5,  0)
     v15 = gk_vols.get(15, 0)
 
-    noise_warning = v15 > 0 and v1 > 2 * v15
+    # Only apply noise warning if short-window data is actually available
+    noise_warning = v15 > 0 and v1 > 0 and v1 > 2 * v15
     if noise_warning:
         score = min(score, 4.0)
         slog("Noise Warning: σ_GK(1min) > 2× σ_GK(15min) — confidence capped at 4/10",
@@ -357,11 +358,13 @@ def compute_confidence_score(gk_vols, nvda_long_q, nvda_short_q, xle_long_q, xle
              reason=f"1min={v1:.4f} 15min={v15:.4f} ratio={v1/max(v15,0.0001):.2f}x",
              level="warning")
 
-    # 5-min divergence penalty
+    # 5-min divergence penalty (only if data available)
     if v5 > 0 and v1 > 0:
         div = abs(v5 - v1) / max(v1, 0.0001)
         if div > 0.30:
             score -= 2.0
+    elif v15 == 0:
+        score -= 1.0  # small penalty if all vol data missing
 
     # Spread penalties
     for q, name in [(nvda_long_q, "NVDA_LONG"), (nvda_short_q, "NVDA_SHORT"),
