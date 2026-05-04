@@ -64,6 +64,8 @@ from alpaca.data.requests import (
     StockBarsRequest, StockLatestQuoteRequest, StockLatestTradeRequest,
 )
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+import sendgrid
+from sendgrid.helpers.mail import Mail
 
 # ── Paths & credentials ───────────────────────────────────────────────────────
 _DIR = Path(__file__).parent
@@ -74,6 +76,78 @@ API_SECRET = os.getenv("WHEEL_ALPACA_API_SECRET")
 
 trading = TradingClient(API_KEY, API_SECRET, paper=True)
 mkt     = StockHistoricalDataClient(API_KEY, API_SECRET)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  V18.9.1 SMTP ALERTS — State transition notifications
+# ══════════════════════════════════════════════════════════════════════════════
+
+ADMIN_EMAIL    = "maz.zabaneh@gmail.com"
+SENDGRID_KEY   = os.getenv("SENDGRID_API_KEY")
+
+STATE_COLORS = {
+    "PENDING":    "#f0ad4e",
+    "THROTTLED":  "#e67e22",
+    "OPEN":       "#27ae60",
+    "RECONCILE":  "#8e44ad",
+    "SANDBOX":    "#2980b9",
+    "LIQUIDATED": "#e74c3c",
+}
+
+def send_alert(from_state, to_state, reason, extra=None):
+    """
+    V18.9.1: Send email alert on every state transition.
+    Non-blocking — failures are logged but do not affect agent execution.
+    """
+    if not SENDGRID_KEY:
+        return
+    try:
+        color    = STATE_COLORS.get(to_state.split("_")[0], "#999")
+        ts       = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        extra_html = ""
+        if extra:
+            rows = "".join(f"<tr><td style='padding:4px 10px;color:#666'>{k}</td>"
+                           f"<td style='padding:4px 10px'><b>{v}</b></td></tr>"
+                           for k, v in extra.items())
+            extra_html = f"<table style='width:100%;margin-top:12px'>{rows}</table>"
+
+        html = f"""
+        <div style="font-family:Arial,sans-serif;max-width:520px;margin:auto">
+          <div style="background:#1a1a2e;padding:16px;border-radius:8px 8px 0 0">
+            <h2 style="color:#fff;margin:0;font-size:18px">⚡ V18.9.1 State Transition Alert</h2>
+            <p style="color:#aaa;margin:4px 0 0;font-size:12px">{ts}</p>
+          </div>
+          <div style="padding:16px;border:1px solid #ddd;border-top:none">
+            <table style="width:100%">
+              <tr>
+                <td style="padding:8px;text-align:center">
+                  <span style="background:#666;color:#fff;padding:4px 14px;border-radius:12px;font-size:13px">{from_state}</span>
+                </td>
+                <td style="text-align:center;font-size:20px">→</td>
+                <td style="padding:8px;text-align:center">
+                  <span style="background:{color};color:#fff;padding:4px 14px;border-radius:12px;font-size:13px">{to_state}</span>
+                </td>
+              </tr>
+            </table>
+            <p style="margin:12px 0 4px"><b>Reason:</b></p>
+            <p style="background:#f8f9fa;padding:10px;border-radius:4px;color:#333;margin:0">{reason}</p>
+            {extra_html}
+          </div>
+          <div style="background:#1a1a2e;padding:10px;border-radius:0 0 8px 8px;text-align:center">
+            <p style="color:#aaa;font-size:11px;margin:0">V18.9.1 Forensic Layer | Paper Account</p>
+          </div>
+        </div>"""
+
+        message = Mail(
+            from_email=ADMIN_EMAIL,
+            to_emails=ADMIN_EMAIL,
+            subject=f"⚡ V18.9.1 Alert: {from_state} → {to_state}",
+            html_content=html,
+        )
+        sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_KEY)
+        sg.send(message)
+    except Exception as e:
+        pass   # Never let alert failure affect agent execution
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1201,8 +1275,26 @@ class V18Agent:
             slog(f"Unknown state: {name}", action="BAD_TRANSITION",
                  reason=f"No state mapping for: {name}", level="error")
             return
+        from_state = type(self.state).__name__.replace("State", "").upper()
         self.set_state(factory())
         self.ledger.save(agent_state=name.upper())
+
+        # V18.9.1 — SMTP alert on every state transition
+        pnl = self.compute_pnl()
+        acct = trading.get_account()
+        threading.Thread(
+            target=send_alert,
+            args=(from_state, name.upper(), f"State transition: {from_state} → {name.upper()}"),
+            kwargs={"extra": {
+                "PnL":          f"{pnl:+.1%}",
+                "Equity":       f"${float(acct.equity):,.2f}",
+                "Cash":         f"${float(acct.cash):,.2f}",
+                "NVDA Spread":  f"${self.nvda_long_strike}C / ${self.nvda_short_strike}C",
+                "XLE Spread":   f"${self.xle_long_strike}P / ${self.xle_short_strike}P",
+                "Mode":         "DRY-RUN" if self.dry_run else "LIVE (PAPER)",
+            }},
+            daemon=True,
+        ).start()
 
     def get_gk_vol(self, latency="15min"):
         mins = int(latency.replace("min", ""))
