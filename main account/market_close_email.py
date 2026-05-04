@@ -160,8 +160,8 @@ def build_email():
       <h3 style="margin:0 0 10px">📈 Underlying Prices</h3>
       <table style="width:100%">
         <tr>
-          <td><b>NVDA</b></td><td>${nvda_price:.2f if nvda_price else 'N/A'}</td>
-          <td><b>XLE</b></td><td>${xle_price:.2f if xle_price else 'N/A'}</td>
+          <td><b>NVDA</b></td><td>${f"{nvda_price:.2f}" if nvda_price else "N/A"}</td>
+          <td><b>XLE</b></td><td>${f"{xle_price:.2f}" if xle_price else "N/A"}</td>
         </tr>
       </table>
     </div>
