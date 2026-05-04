@@ -124,9 +124,12 @@ def rsi(closes, period=14):
     return round(100 - 100 / (1 + avg_gain / avg_loss), 1)
 
 def get_bars(ticker, count=60):
+    from datetime import timedelta
+    start = datetime.now(timezone.utc) - timedelta(days=count * 2)  # extra buffer for weekends
     resp = data.get_stock_bars(StockBarsRequest(
         symbol_or_symbols=ticker,
         timeframe=TimeFrame.Day,
+        start=start,
         limit=count
     ))
     return resp[ticker]
