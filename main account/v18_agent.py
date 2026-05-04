@@ -4,6 +4,7 @@ V18.9 Agentic Trading System — Full Options Spread Implementation
 
 ARCHITECTURE:
   State Machine: Pending → Open → [Reconcile] → Liquidated
+                 Sandbox  ↗  (vol too high — holds until vol normalizes)
 
   NVDA: Bull Call Vertical  $197.5C / $202.5C  (Buy long / Sell short)
   XLE:  Bear Put Vertical   $60.0P  / $55.0P   (Buy long / Sell short)
@@ -323,6 +324,33 @@ class ShadowLedger:
                 json.dump(self.state, f, indent=2)
         log.info("Ledger synced with Alpaca.")
 
+    def clear_pending(self, ticker):
+        """Purge any pending position state for a given ticker (e.g. old USO cache)."""
+        with self._lock:
+            removed = {k: v for k, v in self.state["positions"].items() if ticker.upper() in k}
+            for k in removed:
+                del self.state["positions"][k]
+            removed_orders = {k: v for k, v in self.state["orders"].items()
+                              if ticker.upper() in v.get("symbol", "")}
+            for k in removed_orders:
+                del self.state["orders"][k]
+            if removed or removed_orders:
+                log.info(f"Ledger: cleared {len(removed)} position(s) and "
+                         f"{len(removed_orders)} order(s) for {ticker}")
+            with open(self.filename, "w") as f:
+                json.dump(self.state, f, indent=2)
+
+    def initialize_session(self, ticker):
+        """Mark a fresh session for a ticker in the ledger."""
+        with self._lock:
+            self.state.setdefault("sessions", {})[ticker] = {
+                "initialized_at": datetime.now(timezone.utc).isoformat(),
+                "status": "ACTIVE",
+            }
+            log.info(f"Ledger: session initialized for {ticker}")
+            with open(self.filename, "w") as f:
+                json.dump(self.state, f, indent=2)
+
     def stop(self):
         self._running = False
 
@@ -530,6 +558,24 @@ class StatePending(TradeState):
             )
 
 
+class StateSandbox(TradeState):
+    """
+    State 3 — SANDBOX: Vol too high to enter safely.
+    1-min GK vol > 2x 15-min smoothed vol → hold until vol normalises.
+    Re-checks every poll cycle and transitions to PENDING when safe.
+    """
+    def execute(self, ctx):
+        log.info("STATE: SANDBOX — elevated vol detected, monitoring for normalisation...")
+        short_vol, smooth_vol = ctx.get_gk_vol("1min"), ctx.get_gk_vol("15min")
+        log.info(f"  GK Vol — 1-min: {short_vol:.4f}  15-min: {smooth_vol:.4f}  "
+                 f"ratio: {short_vol / max(smooth_vol, 0.0001):.2f}x")
+        if smooth_vol > 0 and short_vol <= 2 * smooth_vol:
+            log.info("SANDBOX → Vol normalised. Transitioning to PENDING.")
+            ctx.transition_to("PENDING")
+        else:
+            log.info("SANDBOX → Vol still elevated. Holding.")
+
+
 class StateOpen(TradeState):
     """Monitor open spread positions. Check profit gate, stop, Greek drift."""
 
@@ -631,17 +677,31 @@ class StateLiquidated(TradeState):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class V18Agent:
-    def __init__(self, dry_run=False):
-        self.dry_run    = dry_run
-        self.running    = True
-        self.state      = StatePending()
-        self.legs       = {}          # leg_name → LegExecution
-        self.at_breakeven = False
-        self.entry_debits = {}        # symbol → net debit paid
-        self.ledger     = ShadowLedger()
-        self.gk_nvda    = GarmanKlassVol("NVDA")
+    def __init__(self,
+                 nvda_strikes=(NVDA_LONG_STRIKE, NVDA_SHORT_STRIKE),
+                 xle_strikes=(XLE_LONG_STRIKE, XLE_SHORT_STRIKE),
+                 allocation=20000,
+                 qty=QTY,
+                 dry_run=False):
+        self.nvda_long_strike  = nvda_strikes[0]
+        self.nvda_short_strike = nvda_strikes[1]
+        self.xle_long_strike   = xle_strikes[0]
+        self.xle_short_strike  = xle_strikes[1]
+        self.allocation        = allocation
+        self.qty               = qty
+        self.dry_run           = dry_run
+        self.running           = True
+        self.legs              = {}
+        self.at_breakeven      = False
+        self.entry_debits      = {}
+        self.ledger            = ShadowLedger()
+        self.gk_nvda           = GarmanKlassVol("NVDA")
 
-        # Resume from ledger if applicable
+        # Purge any stale USO state and initialise XLE session
+        self.ledger.clear_pending("USO")
+        self.ledger.initialize_session("XLE")
+
+        # Resume or initialise state
         saved = self.ledger.get("agent_state", "PENDING")
         if "LIQUIDATED" in saved:
             log.info("Agent already liquidated. Delete ledger file to restart.")
@@ -650,10 +710,43 @@ class V18Agent:
             log.info(f"Resuming from saved state: {saved}")
             self.state = StateOpen()
             self.at_breakeven = saved == "OPEN_BREAKEVEN"
+        else:
+            # V18.9 RE-INIT: check vol regime before entering PENDING
+            short_vol  = self.get_gk_vol("1min")
+            smooth_vol = self.get_gk_vol("15min")
+            if smooth_vol > 0 and short_vol > 2 * smooth_vol:
+                log.warning(f"GK Vol elevated ({short_vol:.4f} > 2x {smooth_vol:.4f}) — starting in SANDBOX.")
+                self.transition_to("SANDBOX")
+            else:
+                self.transition_to("PENDING")
 
     def set_state(self, state):
         log.info(f"→ Transitioning to {type(state).__name__}")
         self.state = state
+
+    def transition_to(self, state_name):
+        """Named state transitions — matches pseudocode interface."""
+        states = {
+            "PENDING":    StatePending,
+            "OPEN":       StateOpen,
+            "SANDBOX":    StateSandbox,
+            "RECONCILE":  lambda: StateReconcile([]),
+            "LIQUIDATED": lambda: StateLiquidated("MANUAL"),
+        }
+        factory = states.get(state_name.upper())
+        if not factory:
+            log.error(f"Unknown state: {state_name}")
+            return
+        self.set_state(factory())
+        self.ledger.save(agent_state=state_name.upper())
+
+    def get_gk_vol(self, latency="15min"):
+        """
+        Returns GK volatility for the given latency window.
+        latency: '1min' → short window, '15min' → smoothed EMA
+        """
+        short_vol, smooth_vol = self.gk_nvda.compute()
+        return short_vol if latency == "1min" else smooth_vol
 
     def thesis_broken(self):
         """Scenario C: NVDA < $192 OR XLE > $148.50."""
@@ -770,5 +863,12 @@ if __name__ == "__main__":
                         help="Validate signals and logic without placing orders")
     args = parser.parse_args()
 
-    agent = V18Agent(dry_run=args.dry_run)
-    agent.run()
+    # V18.9 RE-INITIALIZATION — XLE swap, configurable strikes
+    nvda_agent = V18Agent(
+        nvda_strikes=(197.50, 202.50),   # Bull Call Vertical
+        xle_strikes=(60.00, 55.00),      # Bear Put Vertical (XLE @ ~$59)
+        allocation=20000,                # $20k per tranche
+        qty=40,
+        dry_run=args.dry_run,
+    )
+    nvda_agent.run()
