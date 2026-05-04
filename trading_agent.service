@@ -1,0 +1,18 @@
+[Unit]
+Description=TradingAgent V18.9 — State Machine Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/trading/main account
+ExecStart=/root/trading/.venv/bin/python /root/trading/main account/trading_agent.py NVDA 40
+Restart=always
+RestartSec=30
+StandardOutput=append:/root/trading/main account/trading_agent.log
+StandardError=append:/root/trading/main account/trading_agent.log
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
