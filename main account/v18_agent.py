@@ -200,16 +200,24 @@ def slog(msg, state="UNKNOWN", action="LOG", reason="", level="info"):
 #  STRATEGY CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── V18.9.4 Trade Manifest (May 4, 2026) ─────────────────────────────────────
+# NVDA: Bull Call Spread  $215C / $220C  — spot $212.45  confidence 9.2/10
+# XLE:  Bull Call Spread  $92C  / $94C   — spot $91.45   confidence 8.8/10
+# Scenario A (Optimal) | Expiry May 8 | $20k per tranche | 1:3 R/R
+# ─────────────────────────────────────────────────────────────────────────────
+
 EXPIRY            = "2026-05-08"
 EXPIRY_OCC        = "260508"
 
-NVDA_LONG_STRIKE  = 197.50
-NVDA_SHORT_STRIKE = 202.50
-XLE_LONG_STRIKE   = 60.00
-XLE_SHORT_STRIKE  = 55.00
+NVDA_LONG_STRIKE  = 215.00
+NVDA_SHORT_STRIKE = 220.00
+XLE_LONG_STRIKE   = 92.00
+XLE_SHORT_STRIKE  = 94.00
 
-QTY               = 40
-THROTTLED_QTY     = QTY // 2       # Mode 2: 50% size
+NVDA_QTY          = 160           # Contracts per NVDA leg
+XLE_QTY           = 400           # Contracts per XLE leg
+QTY               = NVDA_QTY      # Default for single-ticker references
+THROTTLED_QTY     = QTY // 2      # Mode 2: 50% size
 
 PROFIT_GATE       = 0.85
 BREAKEVEN_GATE    = 0.50
@@ -217,8 +225,8 @@ BA_SPREAD_MAX     = 0.002
 SLIPPAGE_MAX      = 0.005
 LIMIT_CHASE_MAX   = 5
 
-NVDA_THESIS_BREAK = 192.00
-XLE_THESIS_BREAK  = 63.00
+NVDA_THESIS_BREAK = 208.50        # ABORT if NVDA < $208.50
+XLE_THESIS_BREAK  = 89.20         # ABORT if XLE  < $89.20  (both bullish)
 
 FRIDAY_KILL_HOUR  = 11
 FRIDAY_KILL_MIN   = 30
@@ -936,10 +944,10 @@ class StatePending(TradeState):
              reason=f"Confidence={score} noise={noise_warning}")
 
         legs_spec = [
-            ("nvda_long",  nvda_long_sym,  OrderSide.BUY,  qty, None if not use_limit else limits[nvda_long_sym]),
-            ("nvda_short", nvda_short_sym, OrderSide.SELL, qty, None if not use_limit else limits[nvda_short_sym]),
-            ("xle_long",   xle_long_sym,   OrderSide.BUY,  qty, None if not use_limit else limits[xle_long_sym]),
-            ("xle_short",  xle_short_sym,  OrderSide.SELL, qty, None if not use_limit else limits[xle_short_sym]),
+            ("nvda_long",  nvda_long_sym,  OrderSide.BUY,  NVDA_QTY, None if not use_limit else limits[nvda_long_sym]),
+            ("nvda_short", nvda_short_sym, OrderSide.SELL, NVDA_QTY, None if not use_limit else limits[nvda_short_sym]),
+            ("xle_long",   xle_long_sym,   OrderSide.BUY,  XLE_QTY,  None if not use_limit else limits[xle_long_sym]),
+            ("xle_short",  xle_short_sym,  OrderSide.SELL, XLE_QTY,  None if not use_limit else limits[xle_short_sym]),
         ]
 
         ctx.spread = SpreadExecution(legs_spec, dry_run=ctx.dry_run)
@@ -1354,11 +1362,12 @@ class V18Agent:
             xle_b,  xle_a  = get_underlying_quote("XLE")
             nvda_p = (nvda_b + nvda_a) / 2 if nvda_b else 999
             xle_p  = (xle_b  + xle_a)  / 2 if xle_b  else 0
-            broken = nvda_p < NVDA_THESIS_BREAK or xle_p > XLE_THESIS_BREAK
+            # Both Bull Call Spreads — abort if either drops below thesis break
+            broken = nvda_p < NVDA_THESIS_BREAK or xle_p < XLE_THESIS_BREAK
             if broken:
                 slog(f"Thesis broken: NVDA=${nvda_p:.2f} XLE=${xle_p:.2f}",
                      state="OPEN", action="THESIS_BREAK",
-                     reason=f"NVDA {nvda_p:.2f}<{NVDA_THESIS_BREAK} OR XLE {xle_p:.2f}>{XLE_THESIS_BREAK}",
+                     reason=f"NVDA {nvda_p:.2f}<{NVDA_THESIS_BREAK} OR XLE {xle_p:.2f}<{XLE_THESIS_BREAK}",
                      level="warning")
             return broken
         except Exception:
