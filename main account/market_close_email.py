@@ -6,20 +6,19 @@ Sends a summary of v18_agent state, PnL, and positions to maz.zabaneh@gmail.com
 
 import json
 import os
-import smtplib
 import sys
 from datetime import datetime, timezone
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 from dotenv import load_dotenv
+import sendgrid
+from sendgrid.helpers.mail import Mail
 
 _DIR = Path(__file__).parent
 load_dotenv(_DIR.parent / ".env")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SMTP_USER    = os.getenv("GMAIL_USER", "maz.zabaneh@gmail.com")
-SMTP_PASS    = os.getenv("GMAIL_APP_PASSWORD")
+SENDGRID_KEY = os.getenv("SENDGRID_API_KEY")
+FROM_EMAIL   = "maz.zabaneh@gmail.com"
 TO_EMAIL     = "maz.zabaneh@gmail.com"
 LEDGER_FILE  = _DIR / "v18_shadow_ledger.json"
 TS_LEDGER    = _DIR / "nvda_trailing_state.json"
@@ -206,17 +205,16 @@ def build_email():
 
 
 def send_email(html_body):
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"📊 Market Close Summary — {datetime.now().strftime('%b %d, %Y')}"
-    msg["From"]    = SMTP_USER
-    msg["To"]      = TO_EMAIL
-    msg.attach(MIMEText(html_body, "html"))
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(SMTP_USER, SMTP_PASS)
-        server.sendmail(SMTP_USER, TO_EMAIL, msg.as_string())
-
-    print(f"Email sent to {TO_EMAIL}")
+    subject = f"📊 Market Close Summary — {datetime.now().strftime('%b %d, %Y')}"
+    message = Mail(
+        from_email=FROM_EMAIL,
+        to_emails=TO_EMAIL,
+        subject=subject,
+        html_content=html_body,
+    )
+    sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_KEY)
+    response = sg.send(message)
+    print(f"Email sent to {TO_EMAIL} — status {response.status_code}")
 
 
 if __name__ == "__main__":
