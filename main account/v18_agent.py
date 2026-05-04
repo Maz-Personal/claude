@@ -66,6 +66,7 @@ from alpaca.data.requests import (
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 import sendgrid
 from sendgrid.helpers.mail import Mail
+import mibian
 
 # ── Paths & credentials ───────────────────────────────────────────────────────
 _DIR = Path(__file__).parent
@@ -265,10 +266,12 @@ POSITION_SCHEMA = {
 #  HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def occ_symbol(ticker, strike, contract_type):
+def occ_symbol(ticker, strike, contract_type, expiry_occ=None):
+    """Build OCC options symbol. Uses dynamic expiry_occ if provided."""
     strike_int = int(round(strike * 1000))
-    c = "C" if contract_type == ContractType.CALL else "P"
-    return f"{ticker}{EXPIRY_OCC}{c}{strike_int:08d}"
+    c   = "C" if contract_type == ContractType.CALL else "P"
+    occ = expiry_occ or EXPIRY_OCC
+    return f"{ticker}{occ}{c}{strike_int:08d}"
 
 
 def now_et():
@@ -326,8 +329,18 @@ def get_option_quote(symbol):
         return None
 
 
-def get_option_greeks(symbol):
-    """Fetch Delta, Theta, Vega for a contract. Returns dict or None."""
+def get_option_greeks(symbol, spot=None, strike=None, days_to_expiry=None,
+                      iv=None, contract_type="call", paper=True):
+    """
+    V18.9.6: If paper=True, compute SYNTHETIC GREEKS via Black-Scholes (mibian).
+    Bypasses Alpaca paper account stale/missing Greeks.
+    Falls back to Alpaca API if synthetic inputs unavailable.
+    """
+    # Synthetic Greeks path (paper account)
+    if paper and spot and strike and days_to_expiry and iv:
+        return SyntheticGreeks.compute(spot, strike, days_to_expiry, iv, contract_type)
+
+    # Alpaca API path (live account or fallback)
     try:
         underlying = ''.join(c for c in symbol if c.isalpha())
         contracts = trading.get_option_contracts(GetOptionContractsRequest(
@@ -347,10 +360,124 @@ def get_option_greeks(symbol):
     return None
 
 
+def confidence_weighted_qty(base_qty, confidence_score):
+    """V18.9.5: Scale position size by confidence. Score 10 = full, score 5 = half."""
+    return max(1, round(base_qty * (confidence_score / 10)))
+
+
 def ba_spread_pct(bid, ask):
     if not bid or not ask or (bid + ask) == 0:
         return 1.0
     return (ask - bid) / ((ask + bid) / 2)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  V18.9.6 — EXPIRY MANAGER (auto-detect nearest Friday ≥ 4 DTE)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ExpiryManager:
+    MIN_DTE = 4
+
+    @staticmethod
+    def get_expiry():
+        """Find nearest Friday with >= 4 DTE.
+        If today is Friday after 14:00 ET, target next week."""
+        from zoneinfo import ZoneInfo
+        now   = datetime.now(ZoneInfo("America/New_York"))
+        today = now.date()
+        start = today + timedelta(days=3) if (today.weekday() == 4 and now.hour >= 14) else today
+        for delta in range(1, 21):
+            candidate = start + timedelta(days=delta)
+            dte = (candidate - today).days
+            if candidate.weekday() == 4 and dte >= ExpiryManager.MIN_DTE:
+                return candidate, dte
+        raise ValueError("Could not find valid expiry within 3 weeks")
+
+    @staticmethod
+    def occ_date(date):
+        return date.strftime("%y%m%d")
+
+    @staticmethod
+    def alpaca_date(date):
+        return date.strftime("%Y-%m-%d")
+
+    @staticmethod
+    def days_to_expiry(expiry_str):
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo("America/New_York")).date()
+        exp   = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+        return (exp - today).days
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  V18.9.6 — SYNTHETIC GREEKS (Black-Scholes via mibian — bypasses paper latency)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class SyntheticGreeks:
+    """
+    Local Black-Scholes implementation via mibian.
+    Used when paper=True to bypass Alpaca paper account stale Greeks.
+    Rule: NO STALE GREEKS (V18.9.6)
+    """
+    RISK_FREE_RATE = 5.0  # annualised %
+
+    @staticmethod
+    def compute(spot, strike, days_to_expiry, iv, contract_type="call"):
+        if days_to_expiry <= 0 or spot <= 0 or strike <= 0 or iv <= 0:
+            return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+        try:
+            bs = mibian.BS(
+                [spot, strike, SyntheticGreeks.RISK_FREE_RATE, days_to_expiry],
+                volatility=iv * 100
+            )
+            if contract_type == "call":
+                return {"delta": bs.callDelta, "gamma": bs.gamma,
+                        "theta": bs.callTheta, "vega": bs.vega}
+            else:
+                return {"delta": bs.putDelta, "gamma": bs.gamma,
+                        "theta": bs.putTheta, "vega": bs.vega}
+        except Exception as e:
+            slog(f"SyntheticGreeks failed: {e}", action="GREEK_ERROR", reason=str(e), level="warning")
+            return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  V18.9.5 — PORTFOLIO CIRCUIT BREAKER (drawdown > 2.5% → SANDBOX)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PortfolioCircuitBreaker:
+    DRAWDOWN_THRESHOLD = 0.025   # 2.5%
+
+    def __init__(self):
+        self.starting_equity = None
+        self.tripped          = False
+
+    def set_baseline(self, equity):
+        if self.starting_equity is None:
+            self.starting_equity = float(equity)
+            slog(f"Circuit breaker baseline: ${self.starting_equity:,.2f}",
+                 action="CB_BASELINE", reason=f"Starting equity recorded: ${self.starting_equity:,.2f}")
+
+    def check(self):
+        if self.starting_equity is None or self.tripped:
+            return self.tripped
+        try:
+            current  = float(trading.get_account().equity)
+            drawdown = (self.starting_equity - current) / self.starting_equity
+            if drawdown > self.DRAWDOWN_THRESHOLD:
+                slog(f"CIRCUIT BREAKER TRIPPED: drawdown {drawdown:.2%}",
+                     action="CIRCUIT_BREAKER",
+                     reason=f"Equity ${self.starting_equity:,.2f} → ${current:,.2f} = {drawdown:.2%} drawdown",
+                     level="error")
+                self.tripped = True
+            return self.tripped
+        except Exception as e:
+            slog(f"Circuit breaker check failed: {e}", action="CB_ERROR", reason=str(e), level="warning")
+            return False
+
+    def reset(self):
+        self.tripped          = False
+        self.starting_equity  = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -906,7 +1033,16 @@ class StatePending(TradeState):
         q_xl = ctx.feed.latest(xle_long_sym)   or get_option_quote(xle_long_sym)   and {"mid": get_option_quote(xle_long_sym)[2]}
         q_xs = ctx.feed.latest(xle_short_sym)  or get_option_quote(xle_short_sym)  and {"mid": get_option_quote(xle_short_sym)[2]}
 
-        gk_vols = ctx.gk_nvda.compute_all()
+        # V18.9.5: Symmetric GK for both tickers
+        gk_nvda_vols = ctx.gk_nvda.compute_all()
+        gk_xle_vols  = ctx.gk_xle.compute_all()
+        # Merge — use worst (highest) vol reading for conservatism
+        gk_vols = {w: max(gk_nvda_vols.get(w, 0), gk_xle_vols.get(w, 0))
+                   for w in [1, 5, 15]}
+        slog(f"GK vol — NVDA: {gk_nvda_vols} XLE: {gk_xle_vols} merged: {gk_vols}",
+             state="PENDING", action="GK_SYMMETRIC",
+             reason="Symmetric GK computed for both tickers")
+
         score, noise_warning = compute_confidence_score(
             gk_vols,
             get_option_quote(nvda_long_sym),
@@ -921,9 +1057,28 @@ class StatePending(TradeState):
                  reason=f"Score {score}/10 below entry threshold")
             return
 
-        # Determine scenario and build legs
+        # V18.9.5: Confidence-weighted allocation
+        qty       = confidence_weighted_qty(ctx.qty, score)
+        slog(f"Confidence-weighted qty: {qty} (base={ctx.qty} score={score}/10)",
+             state="PENDING", action="WEIGHTED_QTY",
+             reason=f"Allocation = base_qty * ({score}/10) = {qty}")
+
+        # V18.9.6: Strike validation vs real-time spot (NO STALE PRICING)
+        nvda_bid, nvda_ask = get_underlying_quote("NVDA")
+        xle_bid,  xle_ask  = get_underlying_quote("XLE")
+        nvda_spot = (nvda_bid + nvda_ask) / 2 if nvda_bid else 0
+        xle_spot  = (xle_bid  + xle_ask)  / 2 if xle_bid  else 0
+        if nvda_spot > 0 and abs(ctx.nvda_long_strike - nvda_spot) / nvda_spot > 0.15:
+            slog(f"Strike validation FAIL: NVDA long {ctx.nvda_long_strike} vs spot {nvda_spot:.2f} (>15% OTM)",
+                 state="PENDING", action="STRIKE_VALIDATION_FAIL",
+                 reason=f"NVDA strike {ctx.nvda_long_strike} is >15% from spot {nvda_spot:.2f}", level="warning")
+        if xle_spot > 0 and abs(ctx.xle_long_strike - xle_spot) / xle_spot > 0.15:
+            slog(f"Strike validation FAIL: XLE long {ctx.xle_long_strike} vs spot {xle_spot:.2f} (>15% OTM)",
+                 state="PENDING", action="STRIKE_VALIDATION_FAIL",
+                 reason=f"XLE strike {ctx.xle_long_strike} is >15% from spot {xle_spot:.2f}", level="warning")
+
+        # Determine scenario
         use_limit   = noise_warning or score < 7
-        qty         = ctx.qty
         spread_ok   = score >= 7
 
         def mid_or_fallback(q, fallback):
@@ -1048,6 +1203,41 @@ class StateOpen(TradeState):
                  state="OPEN", action="FRIDAY_KILL",
                  reason="Mandatory Friday liquidation at 11:30 AM ET")
             ctx.transition_to("LIQUIDATED")
+            return
+
+        # V18.9.5: Portfolio circuit breaker
+        if ctx.circuit_breaker.check():
+            slog("Circuit breaker tripped — entering SANDBOX",
+                 state="OPEN", action="CIRCUIT_BREAKER",
+                 reason="Portfolio drawdown exceeded 2.5% threshold")
+            ctx.transition_to("SANDBOX")
+            return
+
+        # V18.9.6: Auto-roll if DTE ≤ 1
+        dte = ExpiryManager.days_to_expiry(ctx.expiry_date)
+        slog(f"DTE check: {dte} days to {ctx.expiry_date}",
+             state="OPEN", action="DTE_CHECK", reason=f"{dte} DTE remaining")
+        if dte <= 1:
+            slog(f"DTE ≤ 1 — auto-rolling to next expiry",
+                 state="OPEN", action="AUTO_ROLL",
+                 reason=f"Expiry {ctx.expiry_date} has {dte} DTE — closing and re-entering")
+            if ctx.spread:
+                ctx.spread.close_all(dry_run=ctx.dry_run)
+            try:
+                new_exp, new_dte = ExpiryManager.get_expiry()
+                ctx.expiry_date  = ExpiryManager.alpaca_date(new_exp)
+                ctx.expiry_occ   = ExpiryManager.occ_date(new_exp)
+                slog(f"Rolled to new expiry: {ctx.expiry_date} ({new_dte} DTE)",
+                     action="ROLL_COMPLETE", reason=f"Auto-roll: new expiry {ctx.expiry_date}")
+            except Exception as e:
+                slog(f"Auto-roll failed: {e}", action="ROLL_FAIL", reason=str(e), level="error")
+            ctx.spread        = None
+            ctx.entry_limits  = {}
+            ctx.at_breakeven  = False
+            threading.Thread(target=send_alert, daemon=True,
+                args=("OPEN", "AUTO_ROLL", f"Auto-rolled to {ctx.expiry_date}"),
+                kwargs={"extra": {"New Expiry": ctx.expiry_date, "DTE": str(new_dte if 'new_dte' in dir() else '?')}}).start()
+            ctx.transition_to("PENDING")
             return
 
         if ctx.thesis_broken():
@@ -1256,7 +1446,22 @@ class V18Agent:
 
         # Shadow Ledger with zombie callback
         self.ledger  = ShadowLedger(on_zombie_detected=self._on_zombie)
-        self.gk_nvda = GarmanKlassVol("NVDA")
+        self.gk_nvda         = GarmanKlassVol("NVDA")
+        self.gk_xle          = GarmanKlassVol("XLE")      # V18.9.5: symmetric GK
+        self.circuit_breaker = PortfolioCircuitBreaker()   # V18.9.5: drawdown guard
+
+        # V18.9.6: Auto-detect expiry (nearest Friday ≥ 4 DTE)
+        try:
+            exp_date, exp_dte = ExpiryManager.get_expiry()
+            self.expiry_date  = ExpiryManager.alpaca_date(exp_date)
+            self.expiry_occ   = ExpiryManager.occ_date(exp_date)
+            slog(f"Expiry auto-detected: {self.expiry_date} ({exp_dte} DTE)",
+                 action="EXPIRY_DETECT", reason=f"Next valid Friday >= 4 DTE: {self.expiry_date}")
+        except Exception as e:
+            self.expiry_date  = EXPIRY
+            self.expiry_occ   = EXPIRY_OCC
+            slog(f"Expiry detection failed — using hardcoded {EXPIRY}",
+                 action="EXPIRY_FALLBACK", reason=str(e), level="warning")
 
         # Data feed (Producer/Consumer)
         symbols = [
@@ -1401,13 +1606,48 @@ class V18Agent:
             slog(f"PnL computation failed: {e}", action="PNL_ERROR", reason=str(e), level="warning")
             return 0.0
 
+    def _pnl_alert_loop(self):
+        """V18.9.6: Async PnL monitor — alerts on ±15% move or 50% TP hit."""
+        MOVE_THRESHOLD = 0.15
+        TP_THRESHOLD   = 0.50
+        alerted        = set()
+        while self.running:
+            time.sleep(300)   # check every 5 minutes
+            try:
+                if not isinstance(self.state, StateOpen):
+                    continue
+                pnl = self.compute_pnl()
+                # ±15% alert
+                if abs(pnl) >= MOVE_THRESHOLD:
+                    key = f"move_{int(pnl*100)}"
+                    if key not in alerted:
+                        alerted.add(key)
+                        threading.Thread(target=send_alert, daemon=True,
+                            args=("OPEN", "PNL_MOVE_ALERT", f"PnL moved {pnl:+.1%}"),
+                            kwargs={"extra": {"PnL": f"{pnl:+.1%}", "Trigger": "±15% threshold"}}).start()
+                # 50% TP alert
+                if pnl >= TP_THRESHOLD and "tp50" not in alerted:
+                    alerted.add("tp50")
+                    threading.Thread(target=send_alert, daemon=True,
+                        args=("OPEN", "TP_ALERT", f"50% profit target reached: {pnl:+.1%}"),
+                        kwargs={"extra": {"PnL": f"{pnl:+.1%}", "Target": "50% TP"}}).start()
+                # Circuit breaker
+                if self.circuit_breaker.check():
+                    self.transition_to("SANDBOX")
+            except Exception as e:
+                slog(f"PnL alert loop error: {e}", action="PNL_LOOP_ERROR", reason=str(e), level="warning")
+
     def run(self):
         acct = trading.get_account()
+        self.circuit_breaker.set_baseline(acct.equity)   # V18.9.5: record baseline equity
         slog("V18.9 Agentic System starting",
              state="INIT", action="STARTUP",
              reason=f"equity={acct.equity} cash={acct.cash}")
+        # Start async PnL alert monitor
+        threading.Thread(target=self._pnl_alert_loop, daemon=True, name="pnl-alert").start()
+
         print("═══════════════════════════════════════════════════")
-        print(f"  V18.9 Agentic System | {'DRY-RUN' if self.dry_run else 'LIVE (PAPER)'}")
+        print(f"  V18.9.6 Agentic System | {'DRY-RUN' if self.dry_run else 'LIVE (PAPER)'}")
         print(f"  NVDA: Bull Call Vertical ${self.nvda_long_strike}C/${self.nvda_short_strike}C  x{self.qty}")
         print(f"  XLE:  Bear Put Vertical  ${self.xle_long_strike}P/${self.xle_short_strike}P   x{self.qty}")
         print(f"  Expiry  : {EXPIRY}")
