@@ -7,7 +7,7 @@ ARCHITECTURE:
                  Sandbox  ↗  (vol spike OR zombie position detected)
 
   NVDA: Bull Call Vertical  $197.5C / $202.5C  (atomic mleg)
-  XLE:  Bear Put Vertical   $60.0P  / $55.0P   (atomic mleg)
+  XOP:  Bear Put Spread     $165P   / $160P    (atomic mleg)
 
   Expiry     : May 8, 2026
   Allocation : $20,000 per tranche
@@ -201,22 +201,24 @@ def slog(msg, state="UNKNOWN", action="LOG", reason="", level="info"):
 #  STRATEGY CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── V18.9.4 Trade Manifest (May 4, 2026) ─────────────────────────────────────
-# NVDA: Bull Call Spread  $215C / $220C  — spot $212.45  confidence 9.2/10
-# XLE:  Bull Call Spread  $92C  / $94C   — spot $91.45   confidence 8.8/10
-# Scenario A (Optimal) | Expiry May 8 | $20k per tranche | 1:3 R/R
+# ── V18.9.6 Trade Manifest (May 4, 2026) ─────────────────────────────────────
+# NVDA: Bull Call Spread  $200C / $205C  — spot $198.48  confidence 8.5/10
+# XOP:  Bear Put Spread   $165P / $160P  — spot $162.15  confidence 8.5/10
+# Scenario A (Optimal) | Expiry May 8 | $20k base / $17k confidence-weighted | 1:2.5 R/R
+# GK σ: NVDA 35.2 | XOP 31.8
+# Circuit Breaker: $19,500 equity floor
 # ─────────────────────────────────────────────────────────────────────────────
 
 EXPIRY            = "2026-05-08"
 EXPIRY_OCC        = "260508"
 
-NVDA_LONG_STRIKE  = 215.00
-NVDA_SHORT_STRIKE = 220.00
-XLE_LONG_STRIKE   = 92.00
-XLE_SHORT_STRIKE  = 94.00
+NVDA_LONG_STRIKE  = 200.00
+NVDA_SHORT_STRIKE = 205.00
+XOP_LONG_STRIKE   = 165.00        # Bear Put: long the higher strike
+XOP_SHORT_STRIKE  = 160.00        # Bear Put: short the lower strike
 
-NVDA_QTY          = 160           # Contracts per NVDA leg
-XLE_QTY           = 400           # Contracts per XLE leg
+NVDA_QTY          = 100           # Base contracts per NVDA leg (confidence × 0.85 → ~85)
+XOP_QTY           = 130           # Base contracts per XOP leg  (confidence × 0.85 → ~110)
 QTY               = NVDA_QTY      # Default for single-ticker references
 THROTTLED_QTY     = QTY // 2      # Mode 2: 50% size
 
@@ -226,8 +228,8 @@ BA_SPREAD_MAX     = 0.002
 SLIPPAGE_MAX      = 0.005
 LIMIT_CHASE_MAX   = 5
 
-NVDA_THESIS_BREAK = 208.50        # ABORT if NVDA < $208.50
-XLE_THESIS_BREAK  = 89.20         # ABORT if XLE  < $89.20  (both bullish)
+NVDA_THESIS_BREAK = 192.00        # ABORT if NVDA < $192.00
+XOP_THESIS_BREAK  = 170.00        # ABORT if XOP  > $170.00  (bearish — reversal signal)
 
 FRIDAY_KILL_HOUR  = 11
 FRIDAY_KILL_MIN   = 30
@@ -590,7 +592,7 @@ class GarmanKlassVol:
 #  MODEL CONFIDENCE SCORE (1–10)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def compute_confidence_score(gk_vols, nvda_long_q, nvda_short_q, xle_long_q, xle_short_q):
+def compute_confidence_score(gk_vols, nvda_long_q, nvda_short_q, xop_long_q, xop_short_q):
     """
     Score 1-10 based on:
       - Vol smoothing alignment (1-min vs 15-min)
@@ -624,7 +626,7 @@ def compute_confidence_score(gk_vols, nvda_long_q, nvda_short_q, xle_long_q, xle
 
     # Spread penalties
     for q, name in [(nvda_long_q, "NVDA_LONG"), (nvda_short_q, "NVDA_SHORT"),
-                    (xle_long_q,  "XLE_LONG"),  (xle_short_q,  "XLE_SHORT")]:
+                    (xop_long_q,  "XOP_LONG"),  (xop_short_q,  "XOP_SHORT")]:
         if q:
             sp = ba_spread_pct(q[0], q[1])
             if sp > 0.05:
@@ -1025,21 +1027,21 @@ class StatePending(TradeState):
         # Get quotes and compute confidence
         nvda_long_sym  = occ_symbol("NVDA", ctx.nvda_long_strike,  ContractType.CALL)
         nvda_short_sym = occ_symbol("NVDA", ctx.nvda_short_strike, ContractType.CALL)
-        xle_long_sym   = occ_symbol("XLE",  ctx.xle_long_strike,   ContractType.PUT)
-        xle_short_sym  = occ_symbol("XLE",  ctx.xle_short_strike,  ContractType.PUT)
+        xop_long_sym   = occ_symbol("XOP",  ctx.xop_long_strike,   ContractType.PUT)
+        xop_short_sym  = occ_symbol("XOP",  ctx.xop_short_strike,  ContractType.PUT)
 
         q_nl = ctx.feed.latest(nvda_long_sym)  or get_option_quote(nvda_long_sym)  and {"mid": get_option_quote(nvda_long_sym)[2]}
         q_ns = ctx.feed.latest(nvda_short_sym) or get_option_quote(nvda_short_sym) and {"mid": get_option_quote(nvda_short_sym)[2]}
-        q_xl = ctx.feed.latest(xle_long_sym)   or get_option_quote(xle_long_sym)   and {"mid": get_option_quote(xle_long_sym)[2]}
-        q_xs = ctx.feed.latest(xle_short_sym)  or get_option_quote(xle_short_sym)  and {"mid": get_option_quote(xle_short_sym)[2]}
+        q_xl = ctx.feed.latest(xop_long_sym)   or get_option_quote(xop_long_sym)   and {"mid": get_option_quote(xop_long_sym)[2]}
+        q_xs = ctx.feed.latest(xop_short_sym)  or get_option_quote(xop_short_sym)  and {"mid": get_option_quote(xop_short_sym)[2]}
 
         # V18.9.5: Symmetric GK for both tickers
         gk_nvda_vols = ctx.gk_nvda.compute_all()
-        gk_xle_vols  = ctx.gk_xle.compute_all()
+        gk_xop_vols  = ctx.gk_xop.compute_all()
         # Merge — use worst (highest) vol reading for conservatism
-        gk_vols = {w: max(gk_nvda_vols.get(w, 0), gk_xle_vols.get(w, 0))
+        gk_vols = {w: max(gk_nvda_vols.get(w, 0), gk_xop_vols.get(w, 0))
                    for w in [1, 5, 15]}
-        slog(f"GK vol — NVDA: {gk_nvda_vols} XLE: {gk_xle_vols} merged: {gk_vols}",
+        slog(f"GK vol — NVDA: {gk_nvda_vols} XOP: {gk_xop_vols} merged: {gk_vols}",
              state="PENDING", action="GK_SYMMETRIC",
              reason="Symmetric GK computed for both tickers")
 
@@ -1047,8 +1049,8 @@ class StatePending(TradeState):
             gk_vols,
             get_option_quote(nvda_long_sym),
             get_option_quote(nvda_short_sym),
-            get_option_quote(xle_long_sym),
-            get_option_quote(xle_short_sym),
+            get_option_quote(xop_long_sym),
+            get_option_quote(xop_short_sym),
         )
 
         if score < 4:
@@ -1065,17 +1067,17 @@ class StatePending(TradeState):
 
         # V18.9.6: Strike validation vs real-time spot (NO STALE PRICING)
         nvda_bid, nvda_ask = get_underlying_quote("NVDA")
-        xle_bid,  xle_ask  = get_underlying_quote("XLE")
+        xop_bid,  xop_ask  = get_underlying_quote("XOP")
         nvda_spot = (nvda_bid + nvda_ask) / 2 if nvda_bid else 0
-        xle_spot  = (xle_bid  + xle_ask)  / 2 if xle_bid  else 0
+        xop_spot  = (xop_bid  + xop_ask)  / 2 if xop_bid  else 0
         if nvda_spot > 0 and abs(ctx.nvda_long_strike - nvda_spot) / nvda_spot > 0.15:
             slog(f"Strike validation FAIL: NVDA long {ctx.nvda_long_strike} vs spot {nvda_spot:.2f} (>15% OTM)",
                  state="PENDING", action="STRIKE_VALIDATION_FAIL",
                  reason=f"NVDA strike {ctx.nvda_long_strike} is >15% from spot {nvda_spot:.2f}", level="warning")
-        if xle_spot > 0 and abs(ctx.xle_long_strike - xle_spot) / xle_spot > 0.15:
-            slog(f"Strike validation FAIL: XLE long {ctx.xle_long_strike} vs spot {xle_spot:.2f} (>15% OTM)",
+        if xop_spot > 0 and abs(ctx.xop_long_strike - xop_spot) / xop_spot > 0.15:
+            slog(f"Strike validation FAIL: XOP long {ctx.xop_long_strike} vs spot {xop_spot:.2f} (>15% OTM)",
                  state="PENDING", action="STRIKE_VALIDATION_FAIL",
-                 reason=f"XLE strike {ctx.xle_long_strike} is >15% from spot {xle_spot:.2f}", level="warning")
+                 reason=f"XOP strike {ctx.xop_long_strike} is >15% from spot {xop_spot:.2f}", level="warning")
 
         # Determine scenario
         use_limit   = noise_warning or score < 7
@@ -1089,8 +1091,8 @@ class StatePending(TradeState):
         limits = {
             nvda_long_sym:  mid_or_fallback(get_option_quote(nvda_long_sym), ctx.nvda_long_strike * 0.01),
             nvda_short_sym: mid_or_fallback(get_option_quote(nvda_short_sym), ctx.nvda_short_strike * 0.01),
-            xle_long_sym:   mid_or_fallback(get_option_quote(xle_long_sym), ctx.xle_long_strike * 0.01),
-            xle_short_sym:  mid_or_fallback(get_option_quote(xle_short_sym), ctx.xle_short_strike * 0.01),
+            xop_long_sym:   mid_or_fallback(get_option_quote(xop_long_sym), ctx.xop_long_strike * 0.01),
+            xop_short_sym:  mid_or_fallback(get_option_quote(xop_short_sym), ctx.xop_short_strike * 0.01),
         }
 
         scenario = "A" if spread_ok and not noise_warning else "B"
@@ -1101,8 +1103,8 @@ class StatePending(TradeState):
         legs_spec = [
             ("nvda_long",  nvda_long_sym,  OrderSide.BUY,  NVDA_QTY, None if not use_limit else limits[nvda_long_sym]),
             ("nvda_short", nvda_short_sym, OrderSide.SELL, NVDA_QTY, None if not use_limit else limits[nvda_short_sym]),
-            ("xle_long",   xle_long_sym,   OrderSide.BUY,  XLE_QTY,  None if not use_limit else limits[xle_long_sym]),
-            ("xle_short",  xle_short_sym,  OrderSide.SELL, XLE_QTY,  None if not use_limit else limits[xle_short_sym]),
+            ("xop_long",   xop_long_sym,   OrderSide.BUY,  XOP_QTY,  None if not use_limit else limits[xop_long_sym]),
+            ("xop_short",  xop_short_sym,  OrderSide.SELL, XOP_QTY,  None if not use_limit else limits[xop_short_sym]),
         ]
 
         ctx.spread = SpreadExecution(legs_spec, dry_run=ctx.dry_run)
@@ -1110,7 +1112,7 @@ class StatePending(TradeState):
 
         if result == "ok":
             # Record entry Greeks for drift monitoring
-            for sym in [nvda_long_sym, nvda_short_sym, xle_long_sym, xle_short_sym]:
+            for sym in [nvda_long_sym, nvda_short_sym, xop_long_sym, xop_short_sym]:
                 greeks = get_option_greeks(sym)
                 if greeks:
                     ctx.ledger.record_greeks(sym, greeks)
@@ -1165,8 +1167,8 @@ class StateThrottled(TradeState):
         qty = THROTTLED_QTY
         nvda_long_sym  = occ_symbol("NVDA", ctx.nvda_long_strike,  ContractType.CALL)
         nvda_short_sym = occ_symbol("NVDA", ctx.nvda_short_strike, ContractType.CALL)
-        xle_long_sym   = occ_symbol("XLE",  ctx.xle_long_strike,   ContractType.PUT)
-        xle_short_sym  = occ_symbol("XLE",  ctx.xle_short_strike,  ContractType.PUT)
+        xop_long_sym   = occ_symbol("XOP",  ctx.xop_long_strike,   ContractType.PUT)
+        xop_short_sym  = occ_symbol("XOP",  ctx.xop_short_strike,  ContractType.PUT)
 
         def mid(sym):
             q = get_option_quote(sym)
@@ -1175,8 +1177,8 @@ class StateThrottled(TradeState):
         legs_spec = [
             ("nvda_long",  nvda_long_sym,  OrderSide.BUY,  qty, mid(nvda_long_sym)),
             ("nvda_short", nvda_short_sym, OrderSide.SELL, qty, mid(nvda_short_sym)),
-            ("xle_long",   xle_long_sym,   OrderSide.BUY,  qty, mid(xle_long_sym)),
-            ("xle_short",  xle_short_sym,  OrderSide.SELL, qty, mid(xle_short_sym)),
+            ("xop_long",   xop_long_sym,   OrderSide.BUY,  qty, mid(xop_long_sym)),
+            ("xop_short",  xop_short_sym,  OrderSide.SELL, qty, mid(xop_short_sym)),
         ]
 
         slog(f"THROTTLED entry: {qty} contracts (50% size), limit-only",
@@ -1424,7 +1426,7 @@ class StateLiquidated(TradeState):
 class V18Agent:
     def __init__(self,
                  nvda_strikes=(NVDA_LONG_STRIKE, NVDA_SHORT_STRIKE),
-                 xle_strikes=(XLE_LONG_STRIKE,  XLE_SHORT_STRIKE),
+                 xop_strikes=(XOP_LONG_STRIKE,  XOP_SHORT_STRIKE),
                  allocation=20000,
                  qty=QTY,
                  dry_run=False,
@@ -1432,8 +1434,8 @@ class V18Agent:
 
         self.nvda_long_strike  = nvda_strikes[0]
         self.nvda_short_strike = nvda_strikes[1]
-        self.xle_long_strike   = xle_strikes[0]
-        self.xle_short_strike  = xle_strikes[1]
+        self.xop_long_strike   = xop_strikes[0]
+        self.xop_short_strike  = xop_strikes[1]
         self.allocation        = allocation
         self.qty               = qty
         self.dry_run           = dry_run
@@ -1447,7 +1449,7 @@ class V18Agent:
         # Shadow Ledger with zombie callback
         self.ledger  = ShadowLedger(on_zombie_detected=self._on_zombie)
         self.gk_nvda         = GarmanKlassVol("NVDA")
-        self.gk_xle          = GarmanKlassVol("XLE")      # V18.9.5: symmetric GK
+        self.gk_xop          = GarmanKlassVol("XOP")      # V18.9.5: symmetric GK
         self.circuit_breaker = PortfolioCircuitBreaker()   # V18.9.5: drawdown guard
 
         # V18.9.6: Auto-detect expiry (nearest Friday ≥ 4 DTE)
@@ -1467,15 +1469,15 @@ class V18Agent:
         symbols = [
             occ_symbol("NVDA", self.nvda_long_strike,  ContractType.CALL),
             occ_symbol("NVDA", self.nvda_short_strike, ContractType.CALL),
-            occ_symbol("XLE",  self.xle_long_strike,   ContractType.PUT),
-            occ_symbol("XLE",  self.xle_short_strike,  ContractType.PUT),
+            occ_symbol("XOP",  self.xop_long_strike,   ContractType.PUT),
+            occ_symbol("XOP",  self.xop_short_strike,  ContractType.PUT),
         ]
         self.feed = DataFeed(symbols)
         self.feed.start()
 
         # Ledger initialisation
-        self.ledger.clear_pending("USO")
-        self.ledger.initialize_session("XLE")
+        self.ledger.clear_pending("XLE")
+        self.ledger.initialize_session("XOP")
 
         # Resume or initialise state
         saved = self.ledger.get("agent_state", "PENDING")
@@ -1551,7 +1553,7 @@ class V18Agent:
                 "Equity":       f"${float(acct.equity):,.2f}",
                 "Cash":         f"${float(acct.cash):,.2f}",
                 "NVDA Spread":  f"${self.nvda_long_strike}C / ${self.nvda_short_strike}C",
-                "XLE Spread":   f"${self.xle_long_strike}P / ${self.xle_short_strike}P",
+                "XOP Spread":   f"${self.xop_long_strike}P / ${self.xop_short_strike}P",
                 "Mode":         "DRY-RUN" if self.dry_run else "LIVE (PAPER)",
             }},
             daemon=True,
@@ -1564,15 +1566,16 @@ class V18Agent:
     def thesis_broken(self):
         try:
             nvda_b, nvda_a = get_underlying_quote("NVDA")
-            xle_b,  xle_a  = get_underlying_quote("XLE")
+            xop_b,  xop_a  = get_underlying_quote("XOP")
             nvda_p = (nvda_b + nvda_a) / 2 if nvda_b else 999
-            xle_p  = (xle_b  + xle_a)  / 2 if xle_b  else 0
-            # Both Bull Call Spreads — abort if either drops below thesis break
-            broken = nvda_p < NVDA_THESIS_BREAK or xle_p < XLE_THESIS_BREAK
+            xop_p  = (xop_b  + xop_a)  / 2 if xop_b  else 0
+            # NVDA Bull Call: abort if NVDA < $192.00
+            # XOP Bear Put:   abort if XOP  > $170.00 (trend reversal to the upside)
+            broken = nvda_p < NVDA_THESIS_BREAK or xop_p > XOP_THESIS_BREAK
             if broken:
-                slog(f"Thesis broken: NVDA=${nvda_p:.2f} XLE=${xle_p:.2f}",
+                slog(f"Thesis broken: NVDA=${nvda_p:.2f} XOP=${xop_p:.2f}",
                      state="OPEN", action="THESIS_BREAK",
-                     reason=f"NVDA {nvda_p:.2f}<{NVDA_THESIS_BREAK} OR XLE {xle_p:.2f}<{XLE_THESIS_BREAK}",
+                     reason=f"NVDA {nvda_p:.2f}<{NVDA_THESIS_BREAK} OR XOP {xop_p:.2f}>{XOP_THESIS_BREAK}",
                      level="warning")
             return broken
         except Exception:
@@ -1648,8 +1651,8 @@ class V18Agent:
 
         print("═══════════════════════════════════════════════════")
         print(f"  V18.9.6 Agentic System | {'DRY-RUN' if self.dry_run else 'LIVE (PAPER)'}")
-        print(f"  NVDA: Bull Call Vertical ${self.nvda_long_strike}C/${self.nvda_short_strike}C  x{self.qty}")
-        print(f"  XLE:  Bear Put Vertical  ${self.xle_long_strike}P/${self.xle_short_strike}P   x{self.qty}")
+        print(f"  NVDA: Bull Call Spread  ${self.nvda_long_strike}C/${self.nvda_short_strike}C  x{NVDA_QTY}")
+        print(f"  XOP:  Bear Put Spread   ${self.xop_long_strike}P/${self.xop_short_strike}P  x{XOP_QTY}")
         print(f"  Expiry  : {EXPIRY}")
         print(f"  Account : equity ${float(acct.equity):,.2f}  cash ${float(acct.cash):,.2f}")
         print("═══════════════════════════════════════════════════")
@@ -1684,10 +1687,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     agent = V18Agent(
-        nvda_strikes=(197.50, 202.50),
-        xle_strikes=(60.00, 55.00),
+        nvda_strikes=(NVDA_LONG_STRIKE, NVDA_SHORT_STRIKE),
+        xop_strikes=(XOP_LONG_STRIKE,  XOP_SHORT_STRIKE),
         allocation=20000,
-        qty=40,
+        qty=NVDA_QTY,
         dry_run=args.dry_run,
         force_mode=args.mode if args.mode != 1 else None,
     )
